@@ -408,7 +408,7 @@ namespace OpenSim.Region.Framework.Scenes
         public virtual InventoryItemBase GiveInventoryItem(
             UUID recipient, UUID senderId, UUID itemId, UUID recipientFolderId)
         {
-            Console.WriteLine("Scene.Inventory.cs: GiveInventoryItem");
+            //Console.WriteLine("Scene.Inventory.cs: GiveInventoryItem");
 
             InventoryItemBase item = new InventoryItemBase(itemId, senderId);
             item = InventoryService.GetItem(item);
@@ -472,7 +472,8 @@ namespace OpenSim.Region.Framework.Scenes
                 itemCopy.SalePrice = item.SalePrice;
                 itemCopy.SaleType = item.SaleType;
 
-                InventoryService.AddItem(itemCopy);
+                if (InventoryService.AddItem(itemCopy))
+                    TransferInventoryAssets(itemCopy, senderId, recipient);
 
                 if (!Permissions.BypassPermissions())
                 {
@@ -492,6 +493,10 @@ namespace OpenSim.Region.Framework.Scenes
                 return null;
             }
 
+        }
+
+        protected virtual void TransferInventoryAssets(InventoryItemBase item, UUID sender, UUID receiver)
+        {
         }
 
         /// <summary>
@@ -1168,6 +1173,7 @@ namespace OpenSim.Region.Framework.Scenes
 
         private void SendInventoryUpdate(IClientAPI client, InventoryFolderBase folder, bool fetchFolders, bool fetchItems)
         {
+            m_log.DebugFormat("[AGENT INVENTORY]: Send Inventory Folder {0} Update to {1} {2}", folder.Name, client.FirstName, client.LastName);
             InventoryCollection contents = InventoryService.GetFolderContent(client.AgentId, folder.ID);
             client.SendInventoryFolderDetails(client.AgentId, folder.ID, contents.Items, contents.Folders, fetchFolders, fetchItems);
         }
@@ -2265,7 +2271,7 @@ namespace OpenSim.Region.Framework.Scenes
                         group.ClearPartAttachmentData();
                     }
                     
-                    group.UpdateGroupRotation(rot);
+                    group.UpdateGroupRotationR(rot);
                     
                     //group.ApplyPhysics(m_physicalPrim);
                     if (group.RootPart.PhysActor != null && group.RootPart.PhysActor.IsPhysical && vel != Vector3.Zero)
@@ -2345,12 +2351,6 @@ namespace OpenSim.Region.Framework.Scenes
                 item = InventoryService.GetItem(item);
 
                 presence.Appearance.SetAttachment((int)AttachmentPt, itemID, item.AssetID /*att.UUID*/);
-                IAvatarFactory ava = RequestModuleInterface<IAvatarFactory>();
-                if (ava != null)
-                {
-                    ava.UpdateDatabase(remoteClient.AgentId, presence.Appearance);
-                }
-
             }
             return att.UUID;
         }
@@ -2396,12 +2396,6 @@ namespace OpenSim.Region.Framework.Scenes
                 InventoryItemBase item = new InventoryItemBase(itemID, remoteClient.AgentId);
                 item = InventoryService.GetItem(item);
                 presence.Appearance.SetAttachment((int)AttachmentPt, itemID, item.AssetID /*att.UUID*/);
-                IAvatarFactory ava = RequestModuleInterface<IAvatarFactory>();
-                if (ava != null)
-                {
-                    m_log.InfoFormat("[SCENE INVENTORY]: Saving avatar attachment. AgentID:{0} ItemID:{1} AttachmentPoint:{2}", remoteClient.AgentId, itemID, AttachmentPt);
-                    ava.UpdateDatabase(remoteClient.AgentId, presence.Appearance);
-                }
             }
         }
 
@@ -2441,12 +2435,13 @@ namespace OpenSim.Region.Framework.Scenes
             if (TryGetAvatar(remoteClient.AgentId, out presence))
             {
                 presence.Appearance.DetachAttachment(itemID);
-                IAvatarFactory ava = RequestModuleInterface<IAvatarFactory>();
-                if (ava != null)
-                {
-                    ava.UpdateDatabase(remoteClient.AgentId, presence.Appearance);
-                }
 
+                // Save avatar attachment information
+                if (m_AvatarFactory != null)
+                {
+                    m_log.Info("[SCENE]: Saving avatar attachment. AgentID: " + remoteClient.AgentId + ", ItemID: " + itemID);
+                    m_AvatarFactory.UpdateDatabase(remoteClient.AgentId, presence.Appearance);
+                }
             }
 
             m_sceneGraph.DetachSingleAttachmentToInv(itemID, remoteClient);

@@ -81,8 +81,12 @@ namespace OpenSim.Region.CoreModules.World.Land
 
         public void RegionLoaded(Scene scene)
         {
-            if (!enabledYN)
-                return;
+            if (enabledYN)
+                RegionLoadedDoWork(scene);
+        }
+
+        private void RegionLoadedDoWork(Scene scene)
+        {
 /* 
             // For testing on a single instance
             if (scene.RegionInfo.RegionLocX == 1004 && scene.RegionInfo.RegionLocY == 1000)
@@ -343,7 +347,9 @@ namespace OpenSim.Region.CoreModules.World.Land
 
                         lock (scene.WestBorders)
                         {
-                            scene.WestBorders[0].BorderLine.Z += (int) Constants.RegionSize; //auto teleport West
+
+
+                            scene.WestBorders[0].BorderLine.Z = (int)((scene.RegionInfo.RegionLocX - conn.RegionScene.RegionInfo.RegionLocX) * (int)Constants.RegionSize); //auto teleport West
 
                             // Trigger auto teleport to root region
                             scene.WestBorders[0].TriggerRegionX = conn.RegionScene.RegionInfo.RegionLocX;
@@ -410,7 +416,7 @@ namespace OpenSim.Region.CoreModules.World.Land
                             conn.RegionScene.WestBorders[0].BorderLine.Y += (int)Constants.RegionSize;
                         lock (scene.SouthBorders)
                         {
-                            scene.SouthBorders[0].BorderLine.Z += (int) Constants.RegionSize; //auto teleport south
+                            scene.SouthBorders[0].BorderLine.Z = (int)((scene.RegionInfo.RegionLocY - conn.RegionScene.RegionInfo.RegionLocY) * (int)Constants.RegionSize); //auto teleport south
                             scene.SouthBorders[0].TriggerRegionX = conn.RegionScene.RegionInfo.RegionLocX;
                             scene.SouthBorders[0].TriggerRegionY = conn.RegionScene.RegionInfo.RegionLocY;
                         }
@@ -481,7 +487,7 @@ namespace OpenSim.Region.CoreModules.World.Land
 
                         lock (scene.SouthBorders)
                         {
-                            scene.SouthBorders[0].BorderLine.Z += (int) Constants.RegionSize; //auto teleport south
+                            scene.SouthBorders[0].BorderLine.Z = (int)((scene.RegionInfo.RegionLocY - conn.RegionScene.RegionInfo.RegionLocY) * (int)Constants.RegionSize); //auto teleport south
                             scene.SouthBorders[0].TriggerRegionX = conn.RegionScene.RegionInfo.RegionLocX;
                             scene.SouthBorders[0].TriggerRegionY = conn.RegionScene.RegionInfo.RegionLocY;
                         }
@@ -503,7 +509,7 @@ namespace OpenSim.Region.CoreModules.World.Land
 
                         lock (scene.WestBorders)
                         {
-                            scene.WestBorders[0].BorderLine.Z += (int) Constants.RegionSize; //auto teleport West
+                            scene.WestBorders[0].BorderLine.Z = (int)((scene.RegionInfo.RegionLocX - conn.RegionScene.RegionInfo.RegionLocX) * (int)Constants.RegionSize); //auto teleport West
                             scene.WestBorders[0].TriggerRegionX = conn.RegionScene.RegionInfo.RegionLocX;
                             scene.WestBorders[0].TriggerRegionY = conn.RegionScene.RegionInfo.RegionLocY;
                         }

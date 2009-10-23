@@ -117,7 +117,7 @@
       </Files>
     </Project>
 
-    <Project frameworkVersion="v3_5" name="OpenSim.Framework" path="OpenSim/Framework" type="Library">
+    <Project frameworkVersion="v3_5" name="SmartThreadPool" path="ThirdParty/SmartThreadPool" type="Library">
       <Configuration name="Debug">
         <Options>
           <OutputPath>../../bin/</OutputPath>
@@ -133,7 +133,31 @@
       <Reference name="System"/>
       <Reference name="System.Xml"/>
       <Reference name="System.Data"/>
+      <Reference name="System.Web"/>
+      <Files>
+        <Match pattern="*.cs" recurse="false"/>
+      </Files>
+    </Project>
+
+    <Project frameworkVersion="v3_5" name="OpenSim.Framework" path="OpenSim/Framework" type="Library">
+      <Configuration name="Debug">
+        <Options>
+          <OutputPath>../../bin/</OutputPath>
+        </Options>
+      </Configuration>
+      <Configuration name="Release">
+        <Options>
+          <OutputPath>../../bin/</OutputPath>
+        </Options>
+      </Configuration>
+
+      <ReferencePath>../../bin/</ReferencePath>
+      <Reference name="System"/>
+      <Reference name="System.Core"/>
+      <Reference name="System.Xml"/>
+      <Reference name="System.Data"/>
       <Reference name="System.Drawing"/>
+      <Reference name="BclExtras.dll"/>
       <Reference name="OpenMetaverseTypes.dll"/>
       <Reference name="OpenMetaverse.dll"/>
       <Reference name="OpenMetaverse.StructuredData.dll"/>
@@ -143,6 +167,7 @@
       <Reference name="Nini.dll" />
       <Reference name="log4net.dll"/>
       <Reference name="Mono.Addins.dll" />
+      <Reference name="SmartThreadPool" />
       <Files>
         <Match pattern="*.cs" recurse="false"/>
         <Match path="Client" pattern="*.cs" recurse="true"/>
@@ -724,7 +749,6 @@
       <Reference name="System"/>
       <Reference name="System.Xml"/>
       <Reference name="System.Drawing"/>
-      <Reference name="System.Runtime.Remoting"/>
       <Reference name="System.Web"/>
       <Reference name="OpenMetaverseTypes.dll"/>
       <Reference name="OpenMetaverse.StructuredData.dll"/>
@@ -805,7 +829,6 @@
       <Reference name="System"/>
       <Reference name="System.Xml"/>
       <Reference name="System.Data"/>
-      <Reference name="System.Runtime.Remoting"/>
       <Reference name="OpenSim.Framework"/>
       <Reference name="OpenSim.Data" />
       <Reference name="OpenSim.Framework.Communications" />
@@ -1388,6 +1411,37 @@
       </Files>
     </Project>
 
+    <Project frameworkVersion="v3_5" name="OpenSim.Services.PresenceService" path="OpenSim/Services/PresenceService" type="Library">
+      <Configuration name="Debug">
+        <Options>
+          <OutputPath>../../../bin/</OutputPath>
+        </Options>
+      </Configuration>
+      <Configuration name="Release">
+        <Options>
+          <OutputPath>../../../bin/</OutputPath>
+        </Options>
+      </Configuration>
+
+      <ReferencePath>../../../bin/</ReferencePath>
+      <Reference name="System"/>
+      <Reference name="OpenMetaverseTypes.dll"/>
+      <Reference name="OpenMetaverse.dll"/>
+      <Reference name="OpenSim.Framework"/>
+      <Reference name="OpenSim.Framework.Console"/>
+      <Reference name="OpenSim.Framework.Servers.HttpServer"/>
+      <Reference name="OpenSim.Services.Interfaces"/>
+      <Reference name="OpenSim.Services.Base"/>
+      <Reference name="OpenSim.Services.Connectors"/>
+      <Reference name="OpenSim.Data"/>
+      <Reference name="Nini.dll" />
+      <Reference name="log4net.dll"/>
+
+      <Files>
+        <Match pattern="*.cs" recurse="true"/>
+      </Files>
+    </Project>
+
     <Project frameworkVersion="v3_5" name="OpenSim.Services.InventoryService" path="OpenSim/Services/InventoryService" type="Library">
       <Configuration name="Debug">
         <Options>
@@ -1539,7 +1593,6 @@
       <Reference name="System"/>
       <Reference name="System.Xml"/>
       <Reference name="System.Drawing"/>
-      <Reference name="System.Runtime.Remoting"/>
       <Reference name="System.Web"/>
       <Reference name="OpenMetaverseTypes.dll"/>
       <Reference name="OpenMetaverse.StructuredData.dll"/>
@@ -1624,7 +1677,6 @@
       <Reference name="System"/>
       <Reference name="System.Xml"/>
       <Reference name="System.Drawing"/>
-      <Reference name="System.Runtime.Remoting"/>
       <Reference name="System.Web"/>
       <Reference name="OpenMetaverseTypes.dll"/>
       <Reference name="OpenMetaverse.StructuredData.dll"/>
@@ -1682,7 +1734,6 @@
       <ReferencePath>../../../../bin/</ReferencePath>
       <Reference name="System"/>
       <Reference name="System.Drawing"/>
-      <Reference name="System.Runtime.Remoting"/>
       <Reference name="System.Xml"/>
       <Reference name="OpenSim.Data"/>
       <Reference name="OpenSim.Framework"/>
@@ -1755,6 +1806,7 @@
 
       <ReferencePath>../../../../bin/</ReferencePath>
       <Reference name="System"/>
+      <Reference name="System.Core"/>
       <Reference name="System.Xml"/>
       <Reference name="OpenMetaverseTypes.dll"/>
       <Reference name="OpenMetaverse.StructuredData.dll"/>
@@ -1770,6 +1822,7 @@
       <Reference name="OpenSim.Region.Communications.Local"/>
       <Reference name="OpenSim.Region.Physics.Manager"/>
       <Reference name="OpenSim.Services.Interfaces"/>
+      <Reference name="BclExtras.dll"/>
       <Reference name="XMLRPC.dll"/>
       <Reference name="Nini.dll" />
       <Reference name="log4net.dll"/>
@@ -2385,68 +2438,6 @@
         </Match>
         <Match path="Resources" pattern="*.sql" buildAction="EmbeddedResource"/>
         <Match pattern="*.addin.xml" path="Resources" buildAction="EmbeddedResource" recurse="true"/>
-      </Files>
-    </Project>
-
-    <Project frameworkVersion="v3_5" name="OpenSim.Data.NHibernate" path="OpenSim/Data/NHibernate" type="Library">
-      <Configuration name="Debug">
-        <Options>
-          <OutputPath>../../../bin/</OutputPath>
-        </Options>
-      </Configuration>
-      <Configuration name="Release">
-        <Options>
-          <OutputPath>../../../bin/</OutputPath>
-        </Options>
-      </Configuration>
-
-      <ReferencePath>../../../bin/</ReferencePath>
-      <Reference name="System"/>
-      <Reference name="System.Xml"/>
-      <Reference name="System.Data"/>
-      <Reference name="System.Drawing"/>
-      <Reference name="OpenSim.Data"/>
-      <Reference name="OpenSim.Framework"/>
-      <Reference name="OpenSim.Framework.Console"/>
-      <Reference name="OpenSim.Region.Framework"/>
-      <Reference name="OpenMetaverseTypes.dll"/>
-      <Reference name="OpenMetaverse.dll"/>
-      <Reference name="NHibernate.dll"/>
-      <Reference name="log4net.dll"/>
-
-      <Files>
-        <Match pattern="*.cs" recurse="true" >
-          <Exclude name="Tests" pattern="Tests" />
-        </Match>
-        <Match path="Resources" pattern="*.xml" buildAction="EmbeddedResource"/>
-        <Match pattern="*.addin.xml" path="Resources" buildAction="EmbeddedResource" recurse="true"/>
-        <!-- add more as you go -->
-        <Match path="Resources/SQLiteDialect" pattern="*.sql" buildAction="EmbeddedResource"/>
-        <Match path="Resources/MySQLDialect" pattern="*.sql" buildAction="EmbeddedResource"/>
-        <Match path="Resources/MsSql2005Dialect" pattern="*.sql" buildAction="EmbeddedResource"/>
-        <Match path="Resources/PostgreSQLDialect" pattern="*.sql" buildAction="EmbeddedResource"/>
-      </Files>
-    </Project>
-
-    <Project frameworkVersion="v3_5" name="SmartThreadPool" path="ThirdParty/SmartThreadPool" type="Library">
-      <Configuration name="Debug">
-        <Options>
-          <OutputPath>../../bin/</OutputPath>
-        </Options>
-      </Configuration>
-      <Configuration name="Release">
-        <Options>
-          <OutputPath>../../bin/</OutputPath>
-        </Options>
-      </Configuration>
-
-      <ReferencePath>../../bin/</ReferencePath>
-      <Reference name="System"/>
-      <Reference name="System.Xml"/>
-      <Reference name="System.Data"/>
-      <Reference name="System.Web"/>
-      <Files>
-        <Match pattern="*.cs" recurse="false"/>
       </Files>
     </Project>
 
@@ -3175,7 +3166,7 @@
       </Files>
     </Project>
 
-    <Project name="OpenSim.Tools.lslc" path="OpenSim/Tools/Compiler" type="Exe">
+    <Project frameworkVersion="v3_5" name="OpenSim.Tools.lslc" path="OpenSim/Tools/Compiler" type="Exe">
       <Configuration name="Debug">
         <Options>
           <OutputPath>../../../bin/</OutputPath>
@@ -3369,45 +3360,6 @@
       </Files>
     </Project>
 
-    <Project frameworkVersion="v3_5" name="OpenSim.Data.NHibernate.Tests" path="OpenSim/Data/NHibernate/Tests" type="Library">
-      <Configuration name="Debug">
-        <Options>
-          <OutputPath>../../../../bin/</OutputPath>
-        </Options>
-      </Configuration>
-      <Configuration name="Release">
-        <Options>
-          <OutputPath>../../../../bin/</OutputPath>
-        </Options>
-      </Configuration>
-
-      <ReferencePath>../../../../bin/</ReferencePath>
-      <Reference name="System"/>
-      <Reference name="System.Xml"/>
-      <Reference name="System.Data"/>
-      <Reference name="System.Drawing"/>
-      <Reference name="OpenSim.Framework"/>
-      <Reference name="OpenSim.Data"/>
-      <Reference name="OpenSim.Data.NHibernate"/>
-      <Reference name="OpenSim.Data.Tests"/>
-      <Reference name="OpenSim.Tests.Common"/>
-      <Reference name="OpenSim.Framework.Console"/>
-      <Reference name="OpenSim.Region.Framework"/>
-      <Reference name="OpenMetaverseTypes.dll"/>
-      <Reference name="OpenMetaverse.dll"/>
-      <Reference name="MySql.Data.dll"/>
-      <Reference name="Npgsql.dll"/>
-      <Reference name="System.Data.SQLite.dll" />
-      <Reference name="log4net.dll"/>
-      <Reference name="nunit.framework.dll" />
-      <Reference name="NHibernate.dll"/>
-      <Reference name="Mono.Addins.dll" />
-
-      <Files>
-        <Match pattern="*.cs" recurse="true"/>
-      </Files>
-    </Project>
-
     <Project frameworkVersion="v3_5" name="OpenSim.Data.SQLite.Tests" path="OpenSim/Data/SQLite/Tests" type="Library">
       <Configuration name="Debug">
         <Options>
@@ -3498,7 +3450,6 @@
       <Reference name="OpenSim.Tests.Common"/>
       <Reference name="OpenSim.Framework"/>
       <Reference name="OpenSim.Framework.Serialization"/>
-      <Reference name="OpenSim.Framework.Serialization.External"/>
       <Reference name="log4net.dll"/>
       <Reference name="nunit.framework.dll" />
 
@@ -3590,7 +3541,6 @@
       <Reference name="System"/>
       <Reference name="System.Xml"/>
       <Reference name="System.Drawing"/>
-      <Reference name="System.Runtime.Remoting"/>
       <Reference name="OpenMetaverseTypes.dll"/>
       <Reference name="OpenMetaverse.dll"/>
       <Reference name="OpenSim.Data"/>
@@ -3695,6 +3645,7 @@
       </Files>
     </Project>
 
+    <!-- Commented for now until new unit tests are written for the new LLUDP implementation
     <Project frameworkVersion="v3_5" name="OpenSim.Region.ClientStack.LindenUDP.Tests" path="OpenSim/Region/ClientStack/LindenUDP/Tests" type="Library">
       <Configuration name="Debug">
         <Options>
@@ -3728,6 +3679,7 @@
         <Match pattern="*.cs" recurse="false"/>
       </Files>
     </Project>
+    -->
 
     <Project frameworkVersion="v3_5" name="OpenSim.Region.ScriptEngine.Tests" path="OpenSim/Region/ScriptEngine" type="Library">
       <Configuration name="Debug">

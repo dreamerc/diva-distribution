@@ -85,11 +85,7 @@ namespace OpenSim.Client.MXP.PacketHandler
 
             m_transmitter = new Transmitter(port);
 
-            m_clientThread = new Thread(StartListener);
-            m_clientThread.Name = "MXPThread";
-            m_clientThread.IsBackground = true;
-            m_clientThread.Start();
-            ThreadTracker.Add(m_clientThread);
+            StartListener();
         }
 
         public void StartListener()
@@ -339,12 +335,6 @@ namespace OpenSim.Client.MXP.PacketHandler
                                 MXPClientView client = new MXPClientView(session, mxpSessionID, userId, scene, firstName, lastName);
                                 m_clients.Add(client);
                                 m_log.Debug("[MXP ClientStack]: Created ClientView.");
-
-
-                                m_log.Debug("[MXP ClientStack]: Adding ClientView to Scene...");
-                                scene.ClientManager.Add(client.CircuitCode, client);
-                                m_log.Debug("[MXP ClientStack]: Added ClientView to Scene.");
-
 
                                 client.MXPSendSynchronizationBegin(m_scenes[new UUID(joinRequestMessage.BubbleId)].SceneContents.GetTotalObjectsCount());
 

@@ -390,6 +390,32 @@ namespace OpenSim.Region.Framework.Scenes
                 EventManager.TriggerScriptReset(part.LocalId, itemID);
             }
         }
+
+        void ProcessViewerEffect(IClientAPI remoteClient, List<ViewerEffectEventHandlerArg> args)
+        {
+            // TODO: don't create new blocks if recycling an old packet
+            List<ViewerEffectPacket.EffectBlock> effectBlock = new List<ViewerEffectPacket.EffectBlock>();
+            for (int i = 0; i < args.Count; i++)
+            {
+                ViewerEffectPacket.EffectBlock effect = new ViewerEffectPacket.EffectBlock();
+                effect.AgentID = args[i].AgentID;
+                effect.Color = args[i].Color;
+                effect.Duration = args[i].Duration;
+                effect.ID = args[i].ID;
+                effect.Type = args[i].Type;
+                effect.TypeData = args[i].TypeData;
+                effectBlock.Add(effect);
+            }
+            ViewerEffectPacket.EffectBlock[] effectBlockArray = effectBlock.ToArray();
+
+            ClientManager.ForEach(
+                delegate(IClientAPI client)
+                {
+                    if (client.AgentId != remoteClient.AgentId)
+                        client.SendViewerEffect(effectBlockArray);
+                }
+            );
+        }
         
         /// <summary>
         /// Handle a fetch inventory request from the client
@@ -477,9 +503,9 @@ namespace OpenSim.Region.Framework.Scenes
         public InventoryCollection HandleFetchInventoryDescendentsCAPS(UUID agentID, UUID folderID, UUID ownerID,
                                                    bool fetchFolders, bool fetchItems, int sortOrder, out int version)
         {
-//            m_log.DebugFormat(
-//                "[INVENTORY CACHE]: Fetching folders ({0}), items ({1}) from {2} for agent {3}",
-//                fetchFolders, fetchItems, folderID, agentID);
+            m_log.DebugFormat(
+                "[INVENTORY CACHE]: Fetching folders ({0}), items ({1}) from {2} for agent {3}",
+                fetchFolders, fetchItems, folderID, agentID);
 
             // FIXME MAYBE: We're not handling sortOrder!
 
@@ -497,10 +523,11 @@ namespace OpenSim.Region.Framework.Scenes
                 return ret;
             }
 
-            InventoryCollection contents = InventoryService.GetFolderContent(agentID, folderID);
+            InventoryCollection contents = new InventoryCollection();
 
             if (folderID != UUID.Zero)
             {
+                contents = InventoryService.GetFolderContent(agentID, folderID); 
                 InventoryFolderBase containingFolder = new InventoryFolderBase();
                 containingFolder.ID = folderID;
                 containingFolder.Owner = agentID;

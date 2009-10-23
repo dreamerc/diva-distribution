@@ -50,7 +50,15 @@ namespace OpenSim.Client.Linden
     /// </summary>
     public class LLProxyLoginModule : ISharedRegionModule
     {
+        private uint m_port = 0;
+
         private static readonly ILog m_log = LogManager.GetLogger(MethodBase.GetCurrentMethod().DeclaringType);
+
+        public LLProxyLoginModule(uint port)
+        {
+            m_log.DebugFormat("[CLIENT]: LLProxyLoginModule port {0}", port);
+            m_port = port;
+        }
 
         protected bool RegionLoginsEnabled
         {
@@ -76,10 +84,10 @@ namespace OpenSim.Client.Linden
 
         public void Initialise(IConfigSource source)
         {
-            IConfig startupConfig = source.Configs["Startup"];
+            IConfig startupConfig = source.Configs["Modules"];
             if (startupConfig != null)
             {
-                m_enabled = startupConfig.GetBoolean("gridmode", false);
+                m_enabled = startupConfig.GetBoolean("LLProxyLoginModule", false);
             }
         }
 
@@ -148,8 +156,8 @@ namespace OpenSim.Client.Linden
         protected void AddHttpHandlers()
         {
             //we will add our handlers to the first scene we received, as all scenes share a http server. But will this ever change?
-            MainServer.Instance.AddXmlRPCHandler("expect_user", ExpectUser, false);
-            MainServer.Instance.AddXmlRPCHandler("logoff_user", LogOffUser, false);
+            MainServer.GetHttpServer(m_port).AddXmlRPCHandler("expect_user", ExpectUser, false);
+            MainServer.GetHttpServer(m_port).AddXmlRPCHandler("logoff_user", LogOffUser, false);
         }
 
         protected void AddScene(Scene scene)

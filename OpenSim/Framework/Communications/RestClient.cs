@@ -105,7 +105,7 @@ namespace OpenSim.Framework.Communications
         /// <summary>
         /// This flag will help block the main synchroneous method, in case we run in synchroneous mode
         /// </summary>
-        public static ManualResetEvent _allDone = new ManualResetEvent(false);
+        //public static ManualResetEvent _allDone = new ManualResetEvent(false);
 
         /// <summary>
         /// Default time out period
@@ -282,12 +282,12 @@ namespace OpenSim.Framework.Communications
                 else
                 {
                     s.Close();
-                    _allDone.Set();
+                    //_allDone.Set();
                 }
             }
             catch (Exception e)
             {
-                _allDone.Set();
+                //_allDone.Set();
                 _asyncException = e;
             }
         }
@@ -318,11 +318,11 @@ namespace OpenSim.Framework.Communications
                     HttpWebResponse errorResponse = e.Response as HttpWebResponse;
                     if (null != errorResponse && HttpStatusCode.NotFound == errorResponse.StatusCode)
                     {
-                        m_log.Warn("[ASSET] Asset not found (404)");
+                        m_log.Warn("[REST CLIENT] Resource not found (404)");
                     }
                     else
                     {
-                        m_log.Error("[ASSET] Error fetching asset from asset server");
+                        m_log.Error("[REST CLIENT] Error fetching resource from server " + _request.Address.ToString());
                         m_log.Debug(e.ToString());
                     }
 
@@ -403,7 +403,7 @@ namespace OpenSim.Framework.Communications
             /// In case, we are invoked asynchroneously this object will keep track of the state
             /// </summary>
             AsyncResult<Stream> ar = new AsyncResult<Stream>(callback, state);
-            ThreadPool.QueueUserWorkItem(RequestHelper, ar);
+            Util.FireAndForget(RequestHelper, ar);
             return ar;
         }
 

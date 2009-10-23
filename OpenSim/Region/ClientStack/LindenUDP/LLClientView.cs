@@ -43,13 +43,52 @@ using OpenSim.Framework.Communications.Cache;
 using OpenSim.Framework.Statistics;
 using OpenSim.Region.Framework.Interfaces;
 using OpenSim.Region.Framework.Scenes;
+using OpenSim.Region.Framework.Scenes.Hypergrid;
 using OpenSim.Services.Interfaces;
-using Timer=System.Timers.Timer;
+using Timer = System.Timers.Timer;
 using AssetLandmark = OpenSim.Framework.AssetLandmark;
 using Nini.Config;
 
 namespace OpenSim.Region.ClientStack.LindenUDP
 {
+    #region Enums
+
+    /// <summary>
+    /// Specifies the fields that have been changed when sending a prim or
+    /// avatar update
+    /// </summary>
+    [Flags]
+    public enum PrimUpdateFlags : uint
+    {
+        None = 0,
+        AttachmentPoint = 1 << 0,
+        Material = 1 << 1,
+        ClickAction = 1 << 2,
+        Scale = 1 << 3,
+        ParentID = 1 << 4,
+        PrimFlags = 1 << 5,
+        PrimData = 1 << 6,
+        MediaURL = 1 << 7,
+        ScratchPad = 1 << 8,
+        Textures = 1 << 9,
+        TextureAnim = 1 << 10,
+        NameValue = 1 << 11,
+        Position = 1 << 12,
+        Rotation = 1 << 13,
+        Velocity = 1 << 14,
+        Acceleration = 1 << 15,
+        AngularVelocity = 1 << 16,
+        CollisionPlane = 1 << 17,
+        Text = 1 << 18,
+        Particles = 1 << 19,
+        ExtraData = 1 << 20,
+        Sound = 1 << 21,
+        Joint = 1 << 22,
+        FullUpdate = UInt32.MaxValue
+    }
+
+    #endregion Enums
+
     public delegate bool PacketMethod(IClientAPI simClient, Packet packet);
 
     /// <summary>
@@ -58,986 +97,8 @@ namespace OpenSim.Region.ClientStack.LindenUDP
     /// </summary>
     public class LLClientView : IClientAPI, IClientCore, IClientIM, IClientChat, IClientIPEndpoint, IStatsCollector
     {
-        private static readonly ILog m_log = LogManager.GetLogger(MethodBase.GetCurrentMethod().DeclaringType);
+        #region Events
 
-        /* static variables */
-        public static SynchronizeClientHandler SynchronizeClient;
-        /* private variables */
-        private readonly UUID m_sessionId;
-        private readonly UUID m_secureSessionId = UUID.Zero;
-
-        private int m_debugPacketLevel;
-
-        //private readonly IAssetCache m_assetCache;
-        private int m_cachedTextureSerial;
-        private Timer m_clientPingTimer;
-
-        private Timer m_avatarTerseUpdateTimer;
-        private List<ImprovedTerseObjectUpdatePacket.ObjectDataBlock> m_avatarTerseUpdates = new List<ImprovedTerseObjectUpdatePacket.ObjectDataBlock>();
-
-        private Timer m_primTerseUpdateTimer;
-        private List<ImprovedTerseObjectUpdatePacket.ObjectDataBlock> m_primTerseUpdates = new List<ImprovedTerseObjectUpdatePacket.ObjectDataBlock>();
-        private Timer m_primFullUpdateTimer;
-        private List<ObjectUpdatePacket.ObjectDataBlock> m_primFullUpdates =
-                new List<ObjectUpdatePacket.ObjectDataBlock>();
-
-        private bool m_clientBlocked;
-
-        private int m_probesWithNoIngressPackets;
-
-        private readonly UUID m_agentId;
-        private readonly uint m_circuitCode;
-        private int m_moneyBalance;
-        private readonly ILLPacketHandler m_PacketHandler;
-
-        private int m_animationSequenceNumber = 1;
-
-        private readonly byte[] m_channelVersion = Utils.StringToBytes("OpenSimulator Server"); // Dummy value needed by libSL
-
-        private readonly Dictionary<string, UUID> m_defaultAnimations = new Dictionary<string, UUID>();
-
-        private bool m_SendLogoutPacketWhenClosing = true;
-
-        private int m_inPacketsChecked;
-
-        // Used to adjust Sun Orbit values so Linden based viewers properly position sun
-        private const float m_sunPainDaHalfOrbitalCutoff = 4.712388980384689858f;
-
-
-        /* protected variables */
-
-        protected static Dictionary<PacketType, PacketMethod> PacketHandlers =
-            new Dictionary<PacketType, PacketMethod>(); //Global/static handlers for all clients
-
-        protected Dictionary<PacketType, PacketMethod> m_packetHandlers = new Dictionary<PacketType, PacketMethod>();
-        protected Dictionary<string, GenericMessage> m_genericPacketHandlers = new Dictionary<string, GenericMessage>(); //PauPaw:Local Generic Message handlers
-
-        protected IScene m_scene;
-
-        protected LLPacketServer m_networkServer;
-
-        protected LLImageManager m_imageManager;
-
-        /* public variables */
-        protected string m_firstName;
-        protected string m_lastName;
-        protected Thread m_clientThread;
-        protected Vector3 m_startpos;
-        protected EndPoint m_userEndPoint;
-        protected EndPoint m_proxyEndPoint;
-        protected UUID m_activeGroupID = UUID.Zero;
-        protected string m_activeGroupName = String.Empty;
-        protected ulong m_activeGroupPowers;
-        protected Dictionary<UUID,ulong> m_groupPowers = new Dictionary<UUID, ulong>();
-        protected int m_avatarTerseUpdateRate = 50;
-        protected int m_avatarTerseUpdatesPerPacket = 5;
-
-        // LL uses these limits, apparently. Compressed terse would be
-        // 23, but we don't have that yet
-        //
-        protected int m_primTerseUpdatesPerPacket = 10;
-        protected int m_primFullUpdatesPerPacket = 14;
-
-        protected int m_primTerseUpdateRate = 10;
-        protected int m_primFullUpdateRate = 14;
-
-        protected int m_textureSendLimit   = 20;
-        protected int m_textureDataLimit   = 10;
-
-        protected int m_packetMTU = 1400;
-
-        protected IAssetService m_assetService;
-
-        // LLClientView Only
-        public delegate void BinaryGenericMessage(Object sender, string method, byte[][] args);
-
-        /* Instantiated Designated Event Delegates */
-        //- used so we don't create new objects for each incoming packet and then toss it out later */
-
-        private GenericMessage handlerGenericMessage;
-        private RequestAvatarProperties handlerRequestAvatarProperties; //OnRequestAvatarProperties;
-        private UpdateAvatarProperties handlerUpdateAvatarProperties; // OnUpdateAvatarProperties;
-        private ChatMessage handlerChatFromClient; //OnChatFromClient;
-        private ChatMessage handlerChatFromClient2; //OnChatFromClient;
-        private ImprovedInstantMessage handlerInstantMessage; //OnInstantMessage;
-        private FriendActionDelegate handlerApproveFriendRequest; //OnApproveFriendRequest;
-        private FriendshipTermination handlerTerminateFriendship; //OnTerminateFriendship;
-        private RezObject handlerRezObject; //OnRezObject;
-        private DeRezObject handlerDeRezObject; //OnDeRezObject;
-        private ModifyTerrain handlerModifyTerrain;
-        private BakeTerrain handlerBakeTerrain;
-        private EstateChangeInfo handlerEstateChangeInfo;
-        private Action<IClientAPI> handlerRegionHandShakeReply; //OnRegionHandShakeReply;
-        private GenericCall2 handlerRequestWearables; //OnRequestWearables;
-        private Action<IClientAPI> handlerRequestAvatarsData; //OnRequestAvatarsData;
-        private SetAppearance handlerSetAppearance; //OnSetAppearance;
-        private AvatarNowWearing handlerAvatarNowWearing; //OnAvatarNowWearing;
-        private RezSingleAttachmentFromInv handlerRezSingleAttachment; //OnRezSingleAttachmentFromInv;
-        private RezMultipleAttachmentsFromInv handlerRezMultipleAttachments; //OnRezMultipleAttachmentsFromInv;
-        private UUIDNameRequest handlerDetachAttachmentIntoInv; // Detach attachment!
-        private ObjectAttach handlerObjectAttach; //OnObjectAttach;
-        private SetAlwaysRun handlerSetAlwaysRun; //OnSetAlwaysRun;
-        private GenericCall2 handlerCompleteMovementToRegion; //OnCompleteMovementToRegion;
-        private UpdateAgent handlerAgentUpdate; //OnAgentUpdate;
-        private StartAnim handlerStartAnim;
-        private StopAnim handlerStopAnim;
-        private AgentRequestSit handlerAgentRequestSit; //OnAgentRequestSit;
-        private AgentSit handlerAgentSit; //OnAgentSit;
-        private AvatarPickerRequest handlerAvatarPickerRequest; //OnAvatarPickerRequest;
-        private FetchInventory handlerAgentDataUpdateRequest; //OnAgentDataUpdateRequest;
-        private TeleportLocationRequest handlerSetStartLocationRequest; //OnSetStartLocationRequest;
-        private TeleportLandmarkRequest handlerTeleportLandmarkRequest; //OnTeleportLandmarkRequest;
-        private LinkObjects handlerLinkObjects; //OnLinkObjects;
-        private DelinkObjects handlerDelinkObjects; //OnDelinkObjects;
-        private AddNewPrim handlerAddPrim; //OnAddPrim;
-        private UpdateShape handlerUpdatePrimShape; //null;
-        private ObjectExtraParams handlerUpdateExtraParams; //OnUpdateExtraParams;
-        private ObjectDuplicate handlerObjectDuplicate;
-        private ObjectDuplicateOnRay handlerObjectDuplicateOnRay;
-        private ObjectRequest handlerObjectRequest;
-        private ObjectSelect handlerObjectSelect;
-        private ObjectDeselect handlerObjectDeselect;
-        private ObjectIncludeInSearch handlerObjectIncludeInSearch;
-        private UpdatePrimFlags handlerUpdatePrimFlags; //OnUpdatePrimFlags;
-        private UpdatePrimTexture handlerUpdatePrimTexture;
-        private GrabObject handlerGrabObject; //OnGrabObject;
-        private MoveObject handlerGrabUpdate; //OnGrabUpdate;
-        private DeGrabObject handlerDeGrabObject; //OnDeGrabObject;
-        private SpinStart handlerSpinStart; //OnSpinStart;
-        private SpinObject handlerSpinUpdate; //OnSpinUpdate;
-        private SpinStop handlerSpinStop; //OnSpinStop;
-        private GenericCall7 handlerObjectDescription;
-        private GenericCall7 handlerObjectName;
-        private GenericCall7 handlerObjectClickAction;
-        private GenericCall7 handlerObjectMaterial;
-        private ObjectPermissions handlerObjectPermissions;
-        private RequestObjectPropertiesFamily handlerRequestObjectPropertiesFamily; //OnRequestObjectPropertiesFamily;
-        //private TextureRequest handlerTextureRequest;
-        private UDPAssetUploadRequest handlerAssetUploadRequest; //OnAssetUploadRequest;
-        private RequestXfer handlerRequestXfer; //OnRequestXfer;
-        private XferReceive handlerXferReceive; //OnXferReceive;
-        private ConfirmXfer handlerConfirmXfer; //OnConfirmXfer;
-        private AbortXfer handlerAbortXfer;
-        private CreateInventoryFolder handlerCreateInventoryFolder; //OnCreateNewInventoryFolder;
-        private UpdateInventoryFolder handlerUpdateInventoryFolder;
-        private MoveInventoryFolder handlerMoveInventoryFolder;
-        private CreateNewInventoryItem handlerCreateNewInventoryItem; //OnCreateNewInventoryItem;
-        private FetchInventory handlerFetchInventory;
-        private FetchInventoryDescendents handlerFetchInventoryDescendents; //OnFetchInventoryDescendents;
-        private PurgeInventoryDescendents handlerPurgeInventoryDescendents; //OnPurgeInventoryDescendents;
-        private UpdateInventoryItem handlerUpdateInventoryItem;
-        private CopyInventoryItem handlerCopyInventoryItem;
-        private MoveInventoryItem handlerMoveInventoryItem;
-        private RemoveInventoryItem handlerRemoveInventoryItem;
-        private RemoveInventoryFolder handlerRemoveInventoryFolder;
-        private RequestTaskInventory handlerRequestTaskInventory; //OnRequestTaskInventory;
-        private UpdateTaskInventory handlerUpdateTaskInventory; //OnUpdateTaskInventory;
-        private MoveTaskInventory handlerMoveTaskItem;
-        private RemoveTaskInventory handlerRemoveTaskItem; //OnRemoveTaskItem;
-        private RezScript handlerRezScript; //OnRezScript;
-        private RequestMapBlocks handlerRequestMapBlocks; //OnRequestMapBlocks;
-        private RequestMapName handlerMapNameRequest; //OnMapNameRequest;
-        private TeleportLocationRequest handlerTeleportLocationRequest; //OnTeleportLocationRequest;
-        private MoneyBalanceRequest handlerMoneyBalanceRequest; //OnMoneyBalanceRequest;
-        private UUIDNameRequest handlerNameRequest;
-        private ParcelAccessListRequest handlerParcelAccessListRequest; //OnParcelAccessListRequest;
-        private ParcelAccessListUpdateRequest handlerParcelAccessListUpdateRequest; //OnParcelAccessListUpdateRequest;
-        private ParcelPropertiesRequest handlerParcelPropertiesRequest; //OnParcelPropertiesRequest;
-        private ParcelDivideRequest handlerParcelDivideRequest; //OnParcelDivideRequest;
-        private ParcelJoinRequest handlerParcelJoinRequest; //OnParcelJoinRequest;
-        private ParcelPropertiesUpdateRequest handlerParcelPropertiesUpdateRequest; //OnParcelPropertiesUpdateRequest;
-        private ParcelSelectObjects handlerParcelSelectObjects; //OnParcelSelectObjects;
-        private ParcelObjectOwnerRequest handlerParcelObjectOwnerRequest; //OnParcelObjectOwnerRequest;
-        private ParcelAbandonRequest handlerParcelAbandonRequest;
-        private ParcelGodForceOwner handlerParcelGodForceOwner;
-        private ParcelReclaim handlerParcelReclaim;
-        private RequestTerrain handlerRequestTerrain;
-        private RequestTerrain handlerUploadTerrain;
-        private ParcelReturnObjectsRequest handlerParcelReturnObjectsRequest;
-        private RegionInfoRequest handlerRegionInfoRequest; //OnRegionInfoRequest;
-        private EstateCovenantRequest handlerEstateCovenantRequest; //OnEstateCovenantRequest;
-        private RequestGodlikePowers handlerReqGodlikePowers; //OnRequestGodlikePowers;
-        private GodKickUser handlerGodKickUser; //OnGodKickUser;
-        private ViewerEffectEventHandler handlerViewerEffect; //OnViewerEffect;
-        private Action<IClientAPI> handlerLogout; //OnLogout;
-        private MoneyTransferRequest handlerMoneyTransferRequest; //OnMoneyTransferRequest;
-        private ParcelBuy handlerParcelBuy;
-        private EconomyDataRequest handlerEconomoyDataRequest;
-
-        private UpdateVector handlerUpdatePrimSinglePosition; //OnUpdatePrimSinglePosition;
-        private UpdatePrimSingleRotation handlerUpdatePrimSingleRotation; //OnUpdatePrimSingleRotation;
-        private UpdatePrimSingleRotationPosition handlerUpdatePrimSingleRotationPosition; //OnUpdatePrimSingleRotation;
-        private UpdateVector handlerUpdatePrimScale; //OnUpdatePrimScale;
-        private UpdateVector handlerUpdatePrimGroupScale; //OnUpdateGroupScale;
-        private UpdateVector handlerUpdateVector; //OnUpdatePrimGroupPosition;
-        private UpdatePrimRotation handlerUpdatePrimRotation; //OnUpdatePrimGroupRotation;
-        // private UpdatePrimGroupRotation handlerUpdatePrimGroupRotation; //OnUpdatePrimGroupMouseRotation;
-        // private RequestAsset handlerRequestAsset; // OnRequestAsset;
-        private UUIDNameRequest handlerTeleportHomeRequest;
-
-        private RegionHandleRequest handlerRegionHandleRequest; // OnRegionHandleRequest
-        private ParcelInfoRequest handlerParcelInfoRequest; // OnParcelInfoRequest
-
-        private ScriptAnswer handlerScriptAnswer;
-        private RequestPayPrice handlerRequestPayPrice;
-        private ObjectSaleInfo handlerObjectSaleInfo;
-        private ObjectBuy handlerObjectBuy;
-        //private BuyObjectInventory handlerBuyObjectInventory;
-        private ObjectDeselect handlerObjectDetach;
-        private ObjectDrop handlerObjectDrop;
-        private AgentSit handlerOnUndo;
-
-        private ForceReleaseControls handlerForceReleaseControls;
-
-        private GodLandStatRequest handlerLandStatRequest;
-
-        private UUIDNameRequest handlerUUIDGroupNameRequest;
-
-        private ParcelDeedToGroup handlerParcelDeedToGroup;
-
-        private RequestObjectPropertiesFamily handlerObjectGroupRequest;
-        private ScriptReset handlerScriptReset;
-        private GetScriptRunning handlerGetScriptRunning;
-        private SetScriptRunning handlerSetScriptRunning;
-        private UpdateVector handlerAutoPilotGo;
-        //Gesture
-        private ActivateGesture handlerActivateGesture;
-        private DeactivateGesture handlerDeactivateGesture;
-        //Sound
-        private SoundTrigger handlerSoundTrigger;
-        private ObjectOwner handlerObjectOwner;
-
-        private DirPlacesQuery handlerDirPlacesQuery;
-        private DirFindQuery handlerDirFindQuery;
-        private DirLandQuery handlerDirLandQuery;
-        private DirPopularQuery handlerDirPopularQuery;
-        private DirClassifiedQuery handlerDirClassifiedQuery;
-        private ParcelSetOtherCleanTime handlerParcelSetOtherCleanTime;
-
-        private MapItemRequest handlerMapItemRequest;
-
-        private StartLure handlerStartLure;
-        private TeleportLureRequest handlerTeleportLureRequest;
-
-        private NetworkStats handlerNetworkStatsUpdate;
-
-        private ClassifiedInfoRequest handlerClassifiedInfoRequest;
-        private ClassifiedInfoUpdate handlerClassifiedInfoUpdate;
-        private ClassifiedDelete handlerClassifiedDelete;
-        private ClassifiedDelete handlerClassifiedGodDelete;
-
-        private EventNotificationAddRequest handlerEventNotificationAddRequest;
-        private EventNotificationRemoveRequest handlerEventNotificationRemoveRequest;
-        private EventGodDelete handlerEventGodDelete;
-
-        private ParcelDwellRequest handlerParcelDwellRequest;
-
-        private UserInfoRequest handlerUserInfoRequest;
-        private UpdateUserInfo handlerUpdateUserInfo;
-
-        private RetrieveInstantMessages handlerRetrieveInstantMessages;
-
-        private PickDelete handlerPickDelete;
-        private PickGodDelete handlerPickGodDelete;
-        private PickInfoUpdate handlerPickInfoUpdate;
-        private AvatarNotesUpdate handlerAvatarNotesUpdate;
-
-        private MuteListRequest handlerMuteListRequest;
-
-        //private AvatarInterestUpdate handlerAvatarInterestUpdate;
-
-        private PlacesQuery handlerPlacesQuery;
-
-        private readonly IGroupsModule m_GroupsModule;
-
-        private AgentUpdateArgs lastarg = null;
-
-        //private TerrainUnacked handlerUnackedTerrain = null;
-
-        //**
-
-        /* Properties */
-
-        public UUID SecureSessionId
-        {
-            get { return m_secureSessionId; }
-        }
-
-        public IScene Scene
-        {
-            get { return m_scene; }
-        }
-
-        public UUID SessionId
-        {
-            get { return m_sessionId; }
-        }
-
-        public Vector3 StartPos
-        {
-            get { return m_startpos; }
-            set { m_startpos = value; }
-        }
-
-        public UUID AgentId
-        {
-            get { return m_agentId; }
-        }
-
-        public UUID ActiveGroupId
-        {
-            get { return m_activeGroupID; }
-        }
-
-        public string ActiveGroupName
-        {
-            get { return m_activeGroupName; }
-        }
-
-        public ulong ActiveGroupPowers
-        {
-            get { return m_activeGroupPowers; }
-        }
-
-        public bool IsGroupMember(UUID groupID)
-        {
-            return m_groupPowers.ContainsKey(groupID);
-        }
-
-        public ulong GetGroupPowers(UUID groupID)
-        {
-            if (groupID == m_activeGroupID)
-                return m_activeGroupPowers;
-
-            if (m_groupPowers.ContainsKey(groupID))
-                return m_groupPowers[groupID];
-
-            return 0;
-        }
-
-        /// <summary>
-        /// This is a utility method used by single states to not duplicate kicks and blue card of death messages.
-        /// </summary>
-        public bool ChildAgentStatus()
-        {
-            return m_scene.PresenceChildStatus(AgentId);
-        }
-
-        /// <summary>
-        /// First name of the agent/avatar represented by the client
-        /// </summary>
-        public string FirstName
-        {
-            get { return m_firstName; }
-        }
-
-        /// <summary>
-        /// Last name of the agent/avatar represented by the client
-        /// </summary>
-        public string LastName
-        {
-            get { return m_lastName; }
-        }
-
-        /// <summary>
-        /// Full name of the client (first name and last name)
-        /// </summary>
-        public string Name
-        {
-            get { return FirstName + " " + LastName; }
-        }
-
-        public uint CircuitCode
-        {
-            get { return m_circuitCode; }
-        }
-
-        public int MoneyBalance
-        {
-            get { return m_moneyBalance; }
-        }
-
-        public int NextAnimationSequenceNumber
-        {
-            get { return m_animationSequenceNumber++; }
-        }
-
-        public ILLPacketHandler PacketHandler
-        {
-            get { return m_PacketHandler; }
-        }
-
-        bool m_IsActive = true;
-
-        public bool IsActive
-        {
-            get { return m_IsActive; }
-            set { m_IsActive = value; }
-        }
-
-        public bool SendLogoutPacketWhenClosing
-        {
-            set { m_SendLogoutPacketWhenClosing = value; }
-        }
-
-        /* METHODS */
-
-        /// <summary>
-        /// Constructor
-        /// </summary>
-        public LLClientView(
-            EndPoint remoteEP, IScene scene, LLPacketServer packServer,
-            AuthenticateResponse sessionInfo, UUID agentId, UUID sessionId, uint circuitCode, EndPoint proxyEP,
-            ClientStackUserSettings userSettings)
-        {
-            // Should be called first?
-            RegisterInterfaces();
-
-            m_GroupsModule = scene.RequestModuleInterface<IGroupsModule>();
-            m_moneyBalance = 1000;
-
-            m_channelVersion = Utils.StringToBytes(scene.GetSimulatorVersion());
-
-            InitDefaultAnimations();
-
-            m_scene = scene;
-            //m_assetCache = assetCache;
-
-            m_assetService = m_scene.RequestModuleInterface<IAssetService>();
-
-            m_networkServer = packServer;
-
-            m_agentId = agentId;
-            m_sessionId = sessionId;
-            m_circuitCode = circuitCode;
-
-            m_userEndPoint = remoteEP;
-            m_proxyEndPoint = proxyEP;
-
-            m_firstName = sessionInfo.LoginInfo.First;
-            m_lastName = sessionInfo.LoginInfo.Last;
-            m_startpos = sessionInfo.LoginInfo.StartPos;
-
-            if (sessionInfo.LoginInfo.SecureSession != UUID.Zero)
-            {
-                m_secureSessionId = sessionInfo.LoginInfo.SecureSession;
-            }
-
-            // While working on this, the BlockingQueue had me fooled for a bit.
-            // The Blocking queue causes the thread to stop until there's something
-            // in it to process.  It's an on-purpose threadlock though because
-            // without it, the clientloop will suck up all sim resources.
-
-            m_PacketHandler = new LLPacketHandler(this, m_networkServer, userSettings);
-            m_PacketHandler.SynchronizeClient = SynchronizeClient;
-            m_PacketHandler.OnPacketStats += PopulateStats;
-            m_PacketHandler.OnQueueEmpty += HandleQueueEmpty;
-
-            if (scene.Config != null)
-            {
-                IConfig clientConfig = scene.Config.Configs["LLClient"];
-                if (clientConfig != null)
-                {
-                    m_PacketHandler.ReliableIsImportant =
-                        clientConfig.GetBoolean("ReliableIsImportant",
-                                                false);
-                    m_PacketHandler.MaxReliableResends = clientConfig.GetInt("MaxReliableResends",
-                                                                             m_PacketHandler.MaxReliableResends);
-                    m_primTerseUpdatesPerPacket = clientConfig.GetInt("TerseUpdatesPerPacket",
-                                                                      m_primTerseUpdatesPerPacket);
-                    m_primFullUpdatesPerPacket = clientConfig.GetInt("FullUpdatesPerPacket",
-                                                                     m_primFullUpdatesPerPacket);
-
-                    m_primTerseUpdateRate = clientConfig.GetInt("TerseUpdateRate",
-                                                                m_primTerseUpdateRate);
-                    m_primFullUpdateRate = clientConfig.GetInt("FullUpdateRate",
-                                                               m_primFullUpdateRate);
-
-                    m_textureSendLimit = clientConfig.GetInt("TextureSendLimit",
-                                                               m_textureSendLimit);
-
-                    m_textureDataLimit = clientConfig.GetInt("TextureDataLimit",
-                                                               m_textureDataLimit);
-
-                    m_packetMTU = clientConfig.GetInt("PacketMTU", 1400);
-                }
-            }
-
-            RegisterLocalPacketHandlers();
-            m_imageManager = new LLImageManager(this, m_assetService, Scene.RequestModuleInterface<IJ2KDecoder>());
-        }
-
-        public void SetDebugPacketLevel(int newDebugPacketLevel)
-        {
-            m_debugPacketLevel = newDebugPacketLevel;
-        }
-
-        # region Client Methods
-
-        private void CloseCleanup(bool shutdownCircuit)
-        {
-
-            
-            m_scene.RemoveClient(AgentId);
-
-            //m_log.InfoFormat("[CLIENTVIEW] Memory pre  GC {0}", System.GC.GetTotalMemory(false));
-            //m_log.InfoFormat("[CLIENTVIEW] Memory post GC {0}", System.GC.GetTotalMemory(true));
-
-            // Send the STOP packet
-            DisableSimulatorPacket disable = (DisableSimulatorPacket)PacketPool.Instance.GetPacket(PacketType.DisableSimulator);
-            OutPacket(disable, ThrottleOutPacketType.Unknown);
-
-            Thread.Sleep(2000);
-
-            // Shut down timers. Thread Context of this method is murky.   Lock all timers
-            if (m_clientPingTimer.Enabled)
-                lock (m_clientPingTimer)
-                    m_clientPingTimer.Stop();
-            if (m_avatarTerseUpdateTimer.Enabled)
-                lock (m_avatarTerseUpdateTimer)
-                    m_avatarTerseUpdateTimer.Stop();
-            if (m_primTerseUpdateTimer.Enabled)
-                lock (m_primTerseUpdateTimer)
-                    m_primTerseUpdateTimer.Stop();
-            if (m_primFullUpdateTimer.Enabled)
-                lock (m_primFullUpdateTimer)
-                    m_primFullUpdateTimer.Stop();
-
-            // This is just to give the client a reasonable chance of
-            // flushing out all it's packets.  There should probably
-            // be a better mechanism here
-
-            // We can't reach into other scenes and close the connection
-            // We need to do this over grid communications
-            //m_scene.CloseAllAgents(CircuitCode);
-
-            // If we're not shutting down the circuit, then this is the last time we'll go here.
-            // If we are shutting down the circuit, the UDP Server will come back here with
-            // ShutDownCircuit = false
-            if (!(shutdownCircuit))
-            {
-                GC.Collect();
-                m_imageManager = null;
-                // Sends a KillPacket object, with which, the
-                // blockingqueue dequeues and sees it's a killpacket
-                // and terminates within the context of the client thread.
-                // This ensures that it's done from within the context
-                // of the client thread regardless of where Close() is called.
-                KillEndDone();
-            }
-			
-			Terminate();
-        }
-
-        /// <summary>
-        /// Close down the client view.  This *must* be the last method called, since the last  #
-        /// statement of CloseCleanup() aborts the thread.
-        /// </summary>
-        /// <param name="shutdownCircuit"></param>
-        public void Close(bool shutdownCircuit)
-        {
-            m_clientPingTimer.Enabled = false;
-
-            m_log.DebugFormat(
-                "[CLIENT]: Close has been called with shutdownCircuit = {0} for {1} attached to scene {2}",
-                shutdownCircuit, Name, m_scene.RegionInfo.RegionName);
-
-            if (m_imageManager != null)
-                m_imageManager.Close();
-
-            if (m_PacketHandler != null)
-                m_PacketHandler.Flush();
-
-            // raise an event on the packet server to Shutdown the circuit
-            // Now, if we raise the event then the packet server will call this method itself, so don't try cleanup
-            // here otherwise we'll end up calling it twice.
-            // FIXME: In truth, I might be wrong but this whole business of calling this method twice (with different args) looks
-            // horribly tangly.  Hopefully it should be possible to greatly simplify it.
-            if (shutdownCircuit)
-            {
-                if (OnConnectionClosed != null)
-                    OnConnectionClosed(this);
-            }
-            else
-            {
-                CloseCleanup(shutdownCircuit);
-            }
-        }
-
-        public void Kick(string message)
-        {
-            if (!ChildAgentStatus())
-            {
-                KickUserPacket kupack = (KickUserPacket)PacketPool.Instance.GetPacket(PacketType.KickUser);
-                kupack.UserInfo.AgentID = AgentId;
-                kupack.UserInfo.SessionID = SessionId;
-                kupack.TargetBlock.TargetIP = 0;
-                kupack.TargetBlock.TargetPort = 0;
-                kupack.UserInfo.Reason = Utils.StringToBytes(message);
-                OutPacket(kupack, ThrottleOutPacketType.Task);
-                // You must sleep here or users get no message!
-                Thread.Sleep(500);
-            }
-        }
-
-        public void Stop()
-        {
-            // Shut down timers.  Thread Context is Murky, lock all timers!
-            if (m_clientPingTimer.Enabled)
-                lock (m_clientPingTimer)
-                    m_clientPingTimer.Stop();
-
-            if (m_avatarTerseUpdateTimer.Enabled)
-                lock (m_avatarTerseUpdateTimer)
-                    m_avatarTerseUpdateTimer.Stop();
-
-            if (m_primTerseUpdateTimer.Enabled)
-                lock (m_primTerseUpdateTimer)
-                    m_primTerseUpdateTimer.Stop();
-
-            if (m_primFullUpdateTimer.Enabled)
-                lock (m_primFullUpdateTimer)
-                    m_primFullUpdateTimer.Stop();
-        }
-
-        public void Restart()
-        {
-            // re-construct
-            m_PacketHandler.Clear();
-
-            m_clientPingTimer = new Timer(5000);
-            m_clientPingTimer.Elapsed += CheckClientConnectivity;
-            m_clientPingTimer.Enabled = true;
-
-            m_avatarTerseUpdateTimer = new Timer(m_avatarTerseUpdateRate);
-            m_avatarTerseUpdateTimer.Elapsed += new ElapsedEventHandler(ProcessAvatarTerseUpdates);
-            m_avatarTerseUpdateTimer.AutoReset = false;
-
-            m_primTerseUpdateTimer = new Timer(m_primTerseUpdateRate);
-            m_primTerseUpdateTimer.Elapsed += new ElapsedEventHandler(ProcessPrimTerseUpdates);
-            m_primTerseUpdateTimer.AutoReset = false;
-
-            m_primFullUpdateTimer = new Timer(m_primFullUpdateRate);
-            m_primFullUpdateTimer.Elapsed += new ElapsedEventHandler(ProcessPrimFullUpdates);
-            m_primFullUpdateTimer.AutoReset = false;
-        }
-
-        private void Terminate()
-        {
-			IsActive = false;
-			
-			m_clientPingTimer.Close();
-			m_avatarTerseUpdateTimer.Close();
-			m_primTerseUpdateTimer.Close();
-			m_primFullUpdateTimer.Close();
-			
-            m_PacketHandler.OnPacketStats -= PopulateStats;
-			m_PacketHandler.Dispose();
-
-            // wait for thread stoped
-            // m_clientThread.Join();
-
-            // delete circuit code
-            //m_networkServer.CloseClient(this);
-        }
-
-        #endregion
-
-        # region Packet Handling
-
-        public void PopulateStats(int inPackets, int outPackets, int unAckedBytes)
-        {
-            handlerNetworkStatsUpdate = OnNetworkStatsUpdate;
-            if (handlerNetworkStatsUpdate != null)
-            {
-                handlerNetworkStatsUpdate(inPackets, outPackets, unAckedBytes);
-            }
-        }
-
-        public static bool AddPacketHandler(PacketType packetType, PacketMethod handler)
-        {
-            bool result = false;
-            lock (PacketHandlers)
-            {
-                if (!PacketHandlers.ContainsKey(packetType))
-                {
-                    PacketHandlers.Add(packetType, handler);
-                    result = true;
-                }
-            }
-            return result;
-        }
-
-        public bool AddLocalPacketHandler(PacketType packetType, PacketMethod handler)
-        {
-            bool result = false;
-            lock (m_packetHandlers)
-            {
-                if (!m_packetHandlers.ContainsKey(packetType))
-                {
-                    m_packetHandlers.Add(packetType, handler);
-                    result = true;
-                }
-            }
-            return result;
-        }
-
-        public bool AddGenericPacketHandler(string MethodName, GenericMessage handler)
-        {
-            MethodName = MethodName.ToLower().Trim();
-
-            bool result = false;
-            lock (m_genericPacketHandlers)
-            {
-                if (!m_genericPacketHandlers.ContainsKey(MethodName))
-                {
-                    m_genericPacketHandlers.Add(MethodName, handler);
-                    result = true;
-                }
-            }
-            return result;
-        }
-
-        /// <summary>
-        /// Try to process a packet using registered packet handlers
-        /// </summary>
-        /// <param name="packet"></param>
-        /// <returns>True if a handler was found which successfully processed the packet.</returns>
-        protected virtual bool ProcessPacketMethod(Packet packet)
-        {
-            bool result = false;
-            PacketMethod method;
-            if (m_packetHandlers.TryGetValue(packet.Type, out method))
-            {
-                //there is a local handler for this packet type
-                result = method(this, packet);
-            }
-            else
-            {
-                //there is not a local handler so see if there is a Global handler
-                bool found;
-                lock (PacketHandlers)
-                {
-                    found = PacketHandlers.TryGetValue(packet.Type, out method);
-                }
-                if (found)
-                {
-                    result = method(this, packet);
-                }
-            }
-            return result;
-        }
-
-        protected void DebugPacket(string direction, Packet packet)
-        {
-            string info;
-
-            if (m_debugPacketLevel < 255 && packet.Type == PacketType.AgentUpdate)
-                return;
-            if (m_debugPacketLevel < 254 && packet.Type == PacketType.ViewerEffect)
-                return;
-            if (m_debugPacketLevel < 253 && (
-                                     packet.Type == PacketType.CompletePingCheck ||
-                                     packet.Type == PacketType.StartPingCheck
-                                 ))
-                return;
-            if (m_debugPacketLevel < 252 && packet.Type == PacketType.PacketAck)
-                return;
-
-            if (m_debugPacketLevel > 1)
-            {
-                info = packet.ToString();
-            }
-            else
-            {
-                info = packet.Type.ToString();
-            }
-
-            Console.WriteLine(m_circuitCode + ":" + direction + ": " + info);
-        }
-
-        /// <summary>
-        /// Main packet processing loop for the UDP component of the client session.  Both incoming and outgoing
-        /// packets are processed here.
-        /// </summary>
-        protected virtual void ClientLoop()
-        {
-            m_log.DebugFormat(
-                "[CLIENT]: Entered main packet processing loop for {0} in {1}", Name, Scene.RegionInfo.RegionName);
-
-            while (IsActive)
-            {
-                LLQueItem nextPacket = m_PacketHandler.PacketQueue.Dequeue();
-				
-				if (nextPacket == null) {
-					m_log.DebugFormat("[CLIENT]: PacketQueue return null LLQueItem");
-					continue;
-				}
-
-                if (nextPacket.Incoming)
-                {
-                    if (m_debugPacketLevel > 0)
-                       DebugPacket("IN", nextPacket.Packet);
-                    m_PacketHandler.ProcessInPacket(nextPacket);
-                }
-                else
-                {
-                    if (m_debugPacketLevel > 0)
-                       DebugPacket("OUT", nextPacket.Packet);
-                    m_PacketHandler.ProcessOutPacket(nextPacket);
-                }
-            }
-        }
-
-        # endregion
-
-        protected int m_terrainCheckerCount;
-
-        /// <summary>
-        /// Event handler for check client timer
-        /// Checks to ensure that the client is still connected.  If the client has failed to respond to many pings
-        /// in succession then close down the connection.
-        /// </summary>
-        /// <param name="sender"></param>
-        /// <param name="e"></param>
-        protected void CheckClientConnectivity(object sender, ElapsedEventArgs e)
-        {
-            if (m_PacketHandler.PacketsReceived == m_inPacketsChecked)
-            {
-                // no packet came in since the last time we checked...
-
-                m_probesWithNoIngressPackets++;
-                if ((m_probesWithNoIngressPackets > 30 && !m_clientBlocked)    // agent active
-                    || (m_probesWithNoIngressPackets > 90 && m_clientBlocked)) // agent paused
-                {
-                    m_clientPingTimer.Enabled = false;
-
-                    m_log.WarnFormat(
-                        "[CLIENT]: Client for agent {0} {1} has stopped responding to pings.  Closing connection",
-                        Name, AgentId);
-
-                    if (OnConnectionClosed != null)
-                    {
-                        OnConnectionClosed(this);
-                    }
-                }
-                else
-                {
-                    // this will normally trigger at least one packet (ping response)
-                    SendStartPingCheck(0);
-                }
-            }
-            else
-            {
-                // Something received in the meantime - we can reset the counters
-                m_probesWithNoIngressPackets = 0;
-                // ... and store the current number of packets received to find out if another one got in on the next cycle
-                m_inPacketsChecked = m_PacketHandler.PacketsReceived;
-            }
-
-        }
-
-        # region Setup
-
-        /// <summary>
-        /// Starts up the timers to check the client and resend unacked packets
-        /// Adds the client to the OpenSim.Region.Framework.Scenes.Scene
-        /// </summary>
-        protected virtual void InitNewClient()
-        {
-            //this.UploadAssets = new AgentAssetUpload(this, m_assetCache, m_inventoryCache);
-
-            // Ping the client regularly to check that it's still there
-            m_clientPingTimer = new Timer(5000);
-            m_clientPingTimer.Elapsed += CheckClientConnectivity;
-            m_clientPingTimer.Enabled = true;
-
-            m_avatarTerseUpdateTimer = new Timer(m_avatarTerseUpdateRate);
-            m_avatarTerseUpdateTimer.Elapsed += new ElapsedEventHandler(ProcessAvatarTerseUpdates);
-            m_avatarTerseUpdateTimer.AutoReset = false;
-
-            m_primTerseUpdateTimer = new Timer(m_primTerseUpdateRate);
-            m_primTerseUpdateTimer.Elapsed += new ElapsedEventHandler(ProcessPrimTerseUpdates);
-            m_primTerseUpdateTimer.AutoReset = false;
-
-            m_primFullUpdateTimer = new Timer(m_primFullUpdateRate);
-            m_primFullUpdateTimer.Elapsed += new ElapsedEventHandler(ProcessPrimFullUpdates);
-            m_primFullUpdateTimer.AutoReset = false;
-
-            m_scene.AddNewClient(this);
-
-            RefreshGroupMembership();
-        }
-
-        public virtual void Start()
-        {
-            m_clientThread = new Thread(RunUserSession);
-            m_clientThread.Name = "ClientThread";
-            m_clientThread.IsBackground = true;
-            m_clientThread.Start();
-            ThreadTracker.Add(m_clientThread);
-        }
-
-        /// <summary>
-        /// Run a user session.  This method lies at the base of the entire client thread.
-        /// </summary>
-        protected virtual void RunUserSession()
-        {
-            //tell this thread we are using the culture set up for the sim (currently hardcoded to en_US)
-            //otherwise it will override this and use the system default
-            Culture.SetCurrentCulture();
-
-            try
-            {
-                // This sets up all the timers
-                InitNewClient();
-                ClientLoop();
-            }
-            catch (Exception e)
-            {
-                if (e is ThreadAbortException)
-                    throw;
-
-                if (StatsManager.SimExtraStats != null)
-                    StatsManager.SimExtraStats.AddAbnormalClientThreadTermination();
-
-                // Don't let a failure in an individual client thread crash the whole sim.
-                m_log.ErrorFormat(
-                    "[CLIENT]: Client thread for {0} {1} crashed.  Logging them out.", Name, AgentId);
-                m_log.Error(e.ToString());
-
-                try
-                {
-                    // Make an attempt to alert the user that their session has crashed
-                    AgentAlertMessagePacket packet
-                        = BuildAgentAlertPacket(
-                            "Unfortunately the session for this client on the server has crashed.\n"
-                                + "Any further actions taken will not be processed.\n"
-                                + "Please relog", true);
-
-                    LLQueItem item = new LLQueItem();
-                    item.Packet = packet;
-                    item.Sequence = packet.Header.Sequence;
-
-                    m_PacketHandler.ProcessOutPacket(item);
-
-                    // There may be a better way to do this.  Perhaps kick?  Not sure this propogates notifications to
-                    // listeners yet, though.
-                    Logout(this);
-                }
-                catch (Exception e2)
-                {
-                    if (e2 is ThreadAbortException)
-                        throw;
-
-                    m_log.ErrorFormat("[CLIENT]: Further exception thrown on forced session logout.  {0}", e2);
-                }
-            }
-        }
-
-        # endregion
-
-        // Previously ClientView.API partial class
         public event GenericMessage OnGenericMessage;
         public event BinaryGenericMessage OnBinaryGenericMessage;
         public event Action<IClientAPI> OnLogout;
@@ -1197,13 +258,10 @@ namespace OpenSim.Region.ClientStack.LindenUDP
         public event GetScriptRunning OnGetScriptRunning;
         public event SetScriptRunning OnSetScriptRunning;
         public event UpdateVector OnAutoPilotGo;
-
         public event TerrainUnacked OnUnackedTerrain;
-
         public event ActivateGesture OnActivateGesture;
         public event DeactivateGesture OnDeactivateGesture;
         public event ObjectOwner OnObjectOwner;
-
         public event DirPlacesQuery OnDirPlacesQuery;
         public event DirFindQuery OnDirFindQuery;
         public event DirLandQuery OnDirLandQuery;
@@ -1211,44 +269,339 @@ namespace OpenSim.Region.ClientStack.LindenUDP
         public event DirClassifiedQuery OnDirClassifiedQuery;
         public event EventInfoRequest OnEventInfoRequest;
         public event ParcelSetOtherCleanTime OnParcelSetOtherCleanTime;
-
         public event MapItemRequest OnMapItemRequest;
-
         public event OfferCallingCard OnOfferCallingCard;
         public event AcceptCallingCard OnAcceptCallingCard;
         public event DeclineCallingCard OnDeclineCallingCard;
         public event SoundTrigger OnSoundTrigger;
-
         public event StartLure OnStartLure;
         public event TeleportLureRequest OnTeleportLureRequest;
         public event NetworkStats OnNetworkStatsUpdate;
-
         public event ClassifiedInfoRequest OnClassifiedInfoRequest;
         public event ClassifiedInfoUpdate OnClassifiedInfoUpdate;
         public event ClassifiedDelete OnClassifiedDelete;
         public event ClassifiedDelete OnClassifiedGodDelete;
-
         public event EventNotificationAddRequest OnEventNotificationAddRequest;
         public event EventNotificationRemoveRequest OnEventNotificationRemoveRequest;
         public event EventGodDelete OnEventGodDelete;
-
         public event ParcelDwellRequest OnParcelDwellRequest;
-
         public event UserInfoRequest OnUserInfoRequest;
         public event UpdateUserInfo OnUpdateUserInfo;
-
         public event RetrieveInstantMessages OnRetrieveInstantMessages;
-
         public event PickDelete OnPickDelete;
         public event PickGodDelete OnPickGodDelete;
         public event PickInfoUpdate OnPickInfoUpdate;
         public event AvatarNotesUpdate OnAvatarNotesUpdate;
-
         public event MuteListRequest OnMuteListRequest;
-
-        //public event AvatarInterestUpdate OnAvatarInterestUpdate;
-
+        public event AvatarInterestUpdate OnAvatarInterestUpdate;
         public event PlacesQuery OnPlacesQuery;
+        public event AgentFOV OnAgentFOV;
+
+        #endregion Events
+
+        #region Class Members
+
+        // LLClientView Only
+        public delegate void BinaryGenericMessage(Object sender, string method, byte[][] args);
+
+        /// <summary>Used to adjust Sun Orbit values so Linden based viewers properly position sun</summary>
+        private const float m_sunPainDaHalfOrbitalCutoff = 4.712388980384689858f;
+
+        private static readonly ILog m_log = LogManager.GetLogger(MethodBase.GetCurrentMethod().DeclaringType);
+        protected static Dictionary<PacketType, PacketMethod> PacketHandlers = new Dictionary<PacketType, PacketMethod>(); //Global/static handlers for all clients
+
+        private readonly LLUDPServer m_udpServer;
+        private readonly LLUDPClient m_udpClient;
+        private readonly UUID m_sessionId;
+        private readonly UUID m_secureSessionId;
+        private readonly UUID m_agentId;
+        private readonly uint m_circuitCode;
+        private readonly byte[] m_channelVersion = Utils.EmptyBytes;
+        private readonly Dictionary<string, UUID> m_defaultAnimations = new Dictionary<string, UUID>();
+        private readonly IGroupsModule m_GroupsModule;
+
+        private int m_cachedTextureSerial;
+        private PriorityQueue<double, ImprovedTerseObjectUpdatePacket.ObjectDataBlock> m_avatarTerseUpdates;
+        private PriorityQueue<double, ImprovedTerseObjectUpdatePacket.ObjectDataBlock> m_primTerseUpdates;
+        private PriorityQueue<double, ObjectUpdatePacket.ObjectDataBlock> m_primFullUpdates;
+        private int m_moneyBalance;
+        private int m_animationSequenceNumber = 1;
+        private bool m_SendLogoutPacketWhenClosing = true;
+        private AgentUpdateArgs lastarg;
+        private bool m_IsActive = true;
+
+        protected Dictionary<PacketType, PacketMethod> m_packetHandlers = new Dictionary<PacketType, PacketMethod>();
+        protected Dictionary<string, GenericMessage> m_genericPacketHandlers = new Dictionary<string, GenericMessage>(); //PauPaw:Local Generic Message handlers
+        protected Scene m_scene;
+        protected LLImageManager m_imageManager;
+        protected string m_firstName;
+        protected string m_lastName;
+        protected Thread m_clientThread;
+        protected Vector3 m_startpos;
+        protected EndPoint m_userEndPoint;
+        protected UUID m_activeGroupID;
+        protected string m_activeGroupName = String.Empty;
+        protected ulong m_activeGroupPowers;
+        protected Dictionary<UUID, ulong> m_groupPowers = new Dictionary<UUID, ulong>();
+        protected int m_terrainCheckerCount;
+        protected uint m_agentFOVCounter;
+
+        protected IAssetService m_assetService;
+        private IHyperAssetService m_hyperAssets;
+
+
+        #endregion Class Members
+
+        #region Properties
+
+        public LLUDPClient UDPClient { get { return m_udpClient; } }
+        public IPEndPoint RemoteEndPoint { get { return m_udpClient.RemoteEndPoint; } }
+        public UUID SecureSessionId { get { return m_secureSessionId; } }
+        public IScene Scene { get { return m_scene; } }
+        public UUID SessionId { get { return m_sessionId; } }
+        public Vector3 StartPos
+        {
+            get { return m_startpos; }
+            set { m_startpos = value; }
+        }
+        public UUID AgentId { get { return m_agentId; } }
+        public UUID ActiveGroupId { get { return m_activeGroupID; } }
+        public string ActiveGroupName { get { return m_activeGroupName; } }
+        public ulong ActiveGroupPowers { get { return m_activeGroupPowers; } }
+        public bool IsGroupMember(UUID groupID) { return m_groupPowers.ContainsKey(groupID); }
+        /// <summary>
+        /// First name of the agent/avatar represented by the client
+        /// </summary>
+        public string FirstName { get { return m_firstName; } }
+        /// <summary>
+        /// Last name of the agent/avatar represented by the client
+        /// </summary>
+        public string LastName { get { return m_lastName; } }
+        /// <summary>
+        /// Full name of the client (first name and last name)
+        /// </summary>
+        public string Name { get { return FirstName + " " + LastName; } }
+        public uint CircuitCode { get { return m_circuitCode; } }
+        public int MoneyBalance { get { return m_moneyBalance; } }
+        public int NextAnimationSequenceNumber { get { return m_animationSequenceNumber++; } }
+        public bool IsActive
+        {
+            get { return m_IsActive; }
+            set { m_IsActive = value; }
+        }
+        public bool SendLogoutPacketWhenClosing { set { m_SendLogoutPacketWhenClosing = value; } }
+
+        #endregion Properties
+
+        /// <summary>
+        /// Constructor
+        /// </summary>
+        public LLClientView(EndPoint remoteEP, Scene scene, LLUDPServer udpServer, LLUDPClient udpClient, AuthenticateResponse sessionInfo,
+            UUID agentId, UUID sessionId, uint circuitCode)
+        {
+            RegisterInterface<IClientIM>(this);
+            RegisterInterface<IClientChat>(this);
+            RegisterInterface<IClientIPEndpoint>(this);
+
+            InitDefaultAnimations();
+
+            m_scene = scene;
+
+            m_avatarTerseUpdates = new PriorityQueue<double, ImprovedTerseObjectUpdatePacket.ObjectDataBlock>();
+            m_primTerseUpdates = new PriorityQueue<double, ImprovedTerseObjectUpdatePacket.ObjectDataBlock>();
+            m_primFullUpdates = new PriorityQueue<double, ObjectUpdatePacket.ObjectDataBlock>(m_scene.Entities.Count);
+
+            m_assetService = m_scene.RequestModuleInterface<IAssetService>();
+            m_hyperAssets = m_scene.RequestModuleInterface<IHyperAssetService>();
+            m_GroupsModule = scene.RequestModuleInterface<IGroupsModule>();
+            m_imageManager = new LLImageManager(this, m_assetService, Scene.RequestModuleInterface<IJ2KDecoder>());
+            m_channelVersion = Util.StringToBytes256(scene.GetSimulatorVersion());
+            m_agentId = agentId;
+            m_sessionId = sessionId;
+            m_secureSessionId = sessionInfo.LoginInfo.SecureSession;
+            m_circuitCode = circuitCode;
+            m_userEndPoint = remoteEP;
+            m_firstName = sessionInfo.LoginInfo.First;
+            m_lastName = sessionInfo.LoginInfo.Last;
+            m_startpos = sessionInfo.LoginInfo.StartPos;
+            m_moneyBalance = 1000;
+
+            m_udpServer = udpServer;
+            m_udpClient = udpClient;
+            m_udpClient.OnQueueEmpty += HandleQueueEmpty;
+            m_udpClient.OnPacketStats += PopulateStats;
+
+            RegisterLocalPacketHandlers();
+        }
+
+        public void SetDebugPacketLevel(int newDebug)
+        {
+        }
+
+        #region Client Methods
+
+        /// <summary>
+        /// Shut down the client view
+        /// </summary>
+        public void Close()
+        {
+            m_log.DebugFormat(
+                "[CLIENT]: Close has been called for {0} attached to scene {1}",
+                Name, m_scene.RegionInfo.RegionName);
+
+            // Send the STOP packet
+            DisableSimulatorPacket disable = (DisableSimulatorPacket)PacketPool.Instance.GetPacket(PacketType.DisableSimulator);
+            OutPacket(disable, ThrottleOutPacketType.Unknown);
+
+            IsActive = false;
+
+            // Shutdown the image manager
+            if (m_imageManager != null)
+                m_imageManager.Close();
+
+            // Fire the callback for this connection closing
+            if (OnConnectionClosed != null)
+                OnConnectionClosed(this);
+
+            // Flush all of the packets out of the UDP server for this client
+            if (m_udpServer != null)
+                m_udpServer.Flush(m_udpClient);
+
+            // Remove ourselves from the scene
+            m_scene.RemoveClient(AgentId);
+
+            // We can't reach into other scenes and close the connection
+            // We need to do this over grid communications
+            //m_scene.CloseAllAgents(CircuitCode);
+
+            // Disable UDP handling for this client
+            m_udpClient.Shutdown();
+
+            //m_log.InfoFormat("[CLIENTVIEW] Memory pre  GC {0}", System.GC.GetTotalMemory(false));
+            //GC.Collect();
+            //m_log.InfoFormat("[CLIENTVIEW] Memory post GC {0}", System.GC.GetTotalMemory(true));
+        }
+
+        public void Kick(string message)
+        {
+            if (!ChildAgentStatus())
+            {
+                KickUserPacket kupack = (KickUserPacket)PacketPool.Instance.GetPacket(PacketType.KickUser);
+                kupack.UserInfo.AgentID = AgentId;
+                kupack.UserInfo.SessionID = SessionId;
+                kupack.TargetBlock.TargetIP = 0;
+                kupack.TargetBlock.TargetPort = 0;
+                kupack.UserInfo.Reason = Util.StringToBytes256(message);
+                OutPacket(kupack, ThrottleOutPacketType.Task);
+                // You must sleep here or users get no message!
+                Thread.Sleep(500);
+            }
+        }
+
+        public void Stop()
+        {
+
+        }
+
+        #endregion Client Methods
+
+        #region Packet Handling
+
+        public void PopulateStats(int inPackets, int outPackets, int unAckedBytes)
+        {
+            NetworkStats handlerNetworkStatsUpdate = OnNetworkStatsUpdate;
+            if (handlerNetworkStatsUpdate != null)
+            {
+                handlerNetworkStatsUpdate(inPackets, outPackets, unAckedBytes);
+            }
+        }
+
+        public static bool AddPacketHandler(PacketType packetType, PacketMethod handler)
+        {
+            bool result = false;
+            lock (PacketHandlers)
+            {
+                if (!PacketHandlers.ContainsKey(packetType))
+                {
+                    PacketHandlers.Add(packetType, handler);
+                    result = true;
+                }
+            }
+            return result;
+        }
+
+        public bool AddLocalPacketHandler(PacketType packetType, PacketMethod handler)
+        {
+            bool result = false;
+            lock (m_packetHandlers)
+            {
+                if (!m_packetHandlers.ContainsKey(packetType))
+                {
+                    m_packetHandlers.Add(packetType, handler);
+                    result = true;
+                }
+            }
+            return result;
+        }
+
+        public bool AddGenericPacketHandler(string MethodName, GenericMessage handler)
+        {
+            MethodName = MethodName.ToLower().Trim();
+
+            bool result = false;
+            lock (m_genericPacketHandlers)
+            {
+                if (!m_genericPacketHandlers.ContainsKey(MethodName))
+                {
+                    m_genericPacketHandlers.Add(MethodName, handler);
+                    result = true;
+                }
+            }
+            return result;
+        }
+
+        /// <summary>
+        /// Try to process a packet using registered packet handlers
+        /// </summary>
+        /// <param name="packet"></param>
+        /// <returns>True if a handler was found which successfully processed the packet.</returns>
+        protected virtual bool ProcessPacketMethod(Packet packet)
+        {
+            bool result = false;
+            PacketMethod method;
+            if (m_packetHandlers.TryGetValue(packet.Type, out method))
+            {
+                //there is a local handler for this packet type
+                result = method(this, packet);
+            }
+            else
+            {
+                //there is not a local handler so see if there is a Global handler
+                bool found;
+                lock (PacketHandlers)
+                {
+                    found = PacketHandlers.TryGetValue(packet.Type, out method);
+                }
+                if (found)
+                {
+                    result = method(this, packet);
+                }
+            }
+            return result;
+        }
+
+        #endregion Packet Handling
+
+        # region Setup
+
+        public virtual void Start()
+        {
+            m_scene.AddNewClient(this);
+
+            RefreshGroupMembership();
+        }
+
+        # endregion
 
         public void ActivateGesture(UUID assetId, UUID gestureId)
         {
@@ -1259,7 +612,7 @@ namespace OpenSim.Region.ClientStack.LindenUDP
         }
 
         // Sound
-        public void SoundTrigger(UUID soundId, UUID owerid, UUID Objectid,UUID ParentId,float Gain, Vector3 Position,UInt64 Handle)
+        public void SoundTrigger(UUID soundId, UUID owerid, UUID Objectid, UUID ParentId, float Gain, Vector3 Position, UInt64 Handle)
         {
         }
 
@@ -1283,7 +636,7 @@ namespace OpenSim.Region.ClientStack.LindenUDP
             handshake.RegionInfo.WaterHeight = args.waterHeight;
 
             handshake.RegionInfo.RegionFlags = args.regionFlags;
-            handshake.RegionInfo.SimName = Utils.StringToBytes(args.regionName);
+            handshake.RegionInfo.SimName = Util.StringToBytes256(args.regionName);
             handshake.RegionInfo.SimOwner = args.SimOwner;
             handshake.RegionInfo.TerrainBase0 = args.terrainBase0;
             handshake.RegionInfo.TerrainBase1 = args.terrainBase1;
@@ -1296,7 +649,7 @@ namespace OpenSim.Region.ClientStack.LindenUDP
             handshake.RegionInfo.CacheID = UUID.Random(); //I guess this is for the client to remember an old setting?
             handshake.RegionInfo2 = new RegionHandshakePacket.RegionInfo2Block();
             handshake.RegionInfo2.RegionID = regionInfo.RegionID;
-            
+
             handshake.RegionInfo3 = new RegionHandshakePacket.RegionInfo3Block();
             handshake.RegionInfo3.CPUClassID = 9;
             handshake.RegionInfo3.CPURatio = 1;
@@ -1339,11 +692,11 @@ namespace OpenSim.Region.ClientStack.LindenUDP
         {
             ChatFromSimulatorPacket reply = (ChatFromSimulatorPacket)PacketPool.Instance.GetPacket(PacketType.ChatFromSimulator);
             reply.ChatData.Audible = audible;
-            reply.ChatData.Message = Utils.StringToBytes(message);
+            reply.ChatData.Message = Util.StringToBytes1024(message);
             reply.ChatData.ChatType = type;
             reply.ChatData.SourceType = source;
             reply.ChatData.Position = fromPos;
-            reply.ChatData.FromName = Utils.StringToBytes(fromName);
+            reply.ChatData.FromName = Util.StringToBytes256(fromName);
             reply.ChatData.OwnerID = fromAgentID;
             reply.ChatData.SourceID = fromAgentID;
 
@@ -1364,7 +717,7 @@ namespace OpenSim.Region.ClientStack.LindenUDP
 
                 msg.AgentData.AgentID = new UUID(im.fromAgentID);
                 msg.AgentData.SessionID = UUID.Zero;
-                msg.MessageBlock.FromAgentName = Utils.StringToBytes(im.fromAgentName);
+                msg.MessageBlock.FromAgentName = Util.StringToBytes256(im.fromAgentName);
                 msg.MessageBlock.Dialog = im.dialog;
                 msg.MessageBlock.FromGroup = im.fromGroup;
                 if (im.imSessionID == UUID.Zero.Guid)
@@ -1377,12 +730,7 @@ namespace OpenSim.Region.ClientStack.LindenUDP
                 msg.MessageBlock.RegionID = new UUID(im.RegionID);
                 msg.MessageBlock.Timestamp = im.timestamp;
                 msg.MessageBlock.ToAgentID = new UUID(im.toAgentID);
-                // Cap the message length at 1099. There is a limit in ImprovedInstantMessagePacket
-                // the limit is 1100 but a 0 byte gets added to mark the end of the string
-                if (im.message != null && im.message.Length > 1099)
-                    msg.MessageBlock.Message = Utils.StringToBytes(im.message.Substring(0, 1099));
-                else
-                    msg.MessageBlock.Message = Utils.StringToBytes(im.message);
+                msg.MessageBlock.Message = Util.StringToBytes1024(im.message);
                 msg.MessageBlock.BinaryBucket = im.binaryBucket;
 
                 if (im.message.StartsWith("[grouptest]"))
@@ -1400,7 +748,7 @@ namespace OpenSim.Region.ClientStack.LindenUDP
                         eq.ChatterboxInvitation(
                             new UUID("00000000-68f9-1111-024e-222222111123"),
                             "OpenSimulator Testing", new UUID(im.fromAgentID), im.message, new UUID(im.toAgentID), im.fromAgentName, im.dialog, 0,
-                            false, 0, new Vector3(), 1, new UUID(im.imSessionID), im.fromGroup, Utils.StringToBytes("OpenSimulator Testing"));
+                            false, 0, new Vector3(), 1, new UUID(im.imSessionID), im.fromGroup, Util.StringToBytes256("OpenSimulator Testing"));
 
                         eq.ChatterBoxSessionAgentListUpdates(
                             new UUID("00000000-68f9-1111-024e-222222111123"),
@@ -1417,13 +765,13 @@ namespace OpenSim.Region.ClientStack.LindenUDP
         public void SendGenericMessage(string method, List<string> message)
         {
             GenericMessagePacket gmp = new GenericMessagePacket();
-            gmp.MethodData.Method = Utils.StringToBytes(method);
+            gmp.MethodData.Method = Util.StringToBytes256(method);
             gmp.ParamList = new GenericMessagePacket.ParamListBlock[message.Count];
             int i = 0;
             foreach (string val in message)
             {
                 gmp.ParamList[i] = new GenericMessagePacket.ParamListBlock();
-                gmp.ParamList[i++].Parameter = Utils.StringToBytes(val);
+                gmp.ParamList[i++].Parameter = Util.StringToBytes256(val);
             }
             OutPacket(gmp, ThrottleOutPacketType.Task);
         }
@@ -1434,7 +782,7 @@ namespace OpenSim.Region.ClientStack.LindenUDP
         /// <param name="map">heightmap</param>
         public virtual void SendLayerData(float[] map)
         {
-            ThreadPool.QueueUserWorkItem(DoSendLayerData, map);
+            Util.FireAndForget(DoSendLayerData, map);
         }
 
         /// <summary>
@@ -1443,30 +791,53 @@ namespace OpenSim.Region.ClientStack.LindenUDP
         /// <param name="o"></param>
         private void DoSendLayerData(object o)
         {
-            float[] map = (float[])o;
+            float[] map = LLHeightFieldMoronize((float[])o);
 
             try
             {
-                for (int y = 0; y < 16; y++)
-                {
-                    // For some terrains, sending more than one terrain patch at once results in a libsecondlife exception
-                    // see http://opensimulator.org/mantis/view.php?id=1662
-                    //for (int x = 0; x < 16; x += 4)
-                    //{
-                    //    SendLayerPacket(map, y, x);
-                    //    Thread.Sleep(150);
-                    //}
-                    for (int x = 0; x < 16; x++)
-                    {
-                        SendLayerData(x, y, LLHeightFieldMoronize(map));
-                        Thread.Sleep(35);
-                    }
-                }
+                //for (int y = 0; y < 16; y++)
+                //{
+                //    for (int x = 0; x < 16; x++)
+                //    {
+                //        SendLayerData(x, y, map);
+                //    }
+                //}
+
+                // Send LayerData in a spiral pattern. Fun!
+                SendLayerTopRight(map, 0, 0, 15, 15);
             }
             catch (Exception e)
             {
-                m_log.Warn("[CLIENT]: ClientView.API.cs: SendLayerData() - Failed with exception " + e);
+                m_log.Error("[CLIENT]: SendLayerData() Failed with exception: " + e.Message, e);
             }
+        }
+
+        private void SendLayerTopRight(float[] map, int x1, int y1, int x2, int y2)
+        {
+            // Row
+            for (int i = x1; i <= x2; i++)
+                SendLayerData(i, y1, map);
+
+            // Column
+            for (int j = y1 + 1; j <= y2; j++)
+                SendLayerData(x2, j, map);
+     
+            if (x2 - x1 > 0)
+                SendLayerBottomLeft(map, x1, y1 + 1, x2 - 1, y2);
+        }
+
+        void SendLayerBottomLeft(float[] map, int x1, int y1, int x2, int y2)
+        {
+            // Row in reverse
+            for (int i = x2; i >= x1; i--)
+                SendLayerData(i, y2, map);
+
+            // Column in reverse
+            for (int j = y2 - 1; j >= y1; j--)
+                SendLayerData(x1, j, map);
+
+            if (x2 - x1 > 0)
+                SendLayerTopRight(map, x1 + 1, y1, x2, y2 - 1);
         }
 
         /// <summary>
@@ -1497,22 +868,19 @@ namespace OpenSim.Region.ClientStack.LindenUDP
         {
             try
             {
-                int[] patches = new int[1];
-                int patchx, patchy;
-                patchx = px;
-                patchy = py;
+                int[] patches = new int[] { py * 16 + px };
+                float[] heightmap = (map.Length == 65536) ?
+                    map :
+                    LLHeightFieldMoronize(map);
 
-                patches[0] = patchx + 0 + patchy * 16;
-
-                LayerDataPacket layerpack = TerrainCompressor.CreateLandPacket(((map.Length==65536)? map : LLHeightFieldMoronize(map)), patches);
-                layerpack.Header.Zerocoded = true;
+                LayerDataPacket layerpack = TerrainCompressor.CreateLandPacket(heightmap, patches);
+                layerpack.Header.Reliable = true;
 
                 OutPacket(layerpack, ThrottleOutPacketType.Land);
-
             }
             catch (Exception e)
             {
-                m_log.Warn("[client]: ClientView.API.cs: SendLayerData() - Failed with exception " + e.ToString());
+                m_log.Error("[CLIENT]: SendLayerData() Failed with exception: " + e.Message, e);
             }
         }
 
@@ -1541,7 +909,6 @@ namespace OpenSim.Region.ClientStack.LindenUDP
                         Array.Copy(map, i * (int)Constants.RegionSize, returnmap, i * 256, 256);
                 }
 
-                
                 //Array.Copy(map,0,returnmap,0,(map.Length < 65536)? map.Length : 65536);
 
                 return returnmap;
@@ -1555,7 +922,7 @@ namespace OpenSim.Region.ClientStack.LindenUDP
         /// <param name="windSpeeds">16x16 array of wind speeds</param>
         public virtual void SendWindData(Vector2[] windSpeeds)
         {
-            ThreadPool.QueueUserWorkItem(new WaitCallback(DoSendWindData), (object)windSpeeds);
+            Util.FireAndForget(DoSendWindData, windSpeeds);
         }
 
         /// <summary>
@@ -1564,7 +931,7 @@ namespace OpenSim.Region.ClientStack.LindenUDP
         /// <param name="windSpeeds">16x16 array of cloud densities</param>
         public virtual void SendCloudData(float[] cloudDensity)
         {
-            ThreadPool.QueueUserWorkItem(new WaitCallback(DoSendCloudData), (object)cloudDensity);
+            Util.FireAndForget(DoSendCloudData, cloudDensity);
         }
 
         /// <summary>
@@ -1653,14 +1020,14 @@ namespace OpenSim.Region.ClientStack.LindenUDP
             agentData.child = false;
             agentData.firstname = m_firstName;
             agentData.lastname = m_lastName;
-            
+
             ICapabilitiesModule capsModule = m_scene.RequestModuleInterface<ICapabilitiesModule>();
-            
+
             if (capsModule == null) // can happen when shutting down.
                 return agentData;
 
             agentData.CapsPath = capsModule.GetCapsPath(m_agentId);
-            agentData.ChildrenCapSeeds = new Dictionary<ulong,string>(capsModule.GetChildrenSeeds(m_agentId));
+            agentData.ChildrenCapSeeds = new Dictionary<ulong, string>(capsModule.GetChildrenSeeds(m_agentId));
 
             return agentData;
         }
@@ -1687,7 +1054,7 @@ namespace OpenSim.Region.ClientStack.LindenUDP
             newSimPack.RegionData.SimIP += (uint)byteIP[1] << 8;
             newSimPack.RegionData.SimIP += (uint)byteIP[0];
             newSimPack.RegionData.SimPort = (ushort)externalIPEndPoint.Port;
-            newSimPack.RegionData.SeedCapability = Utils.StringToBytes(capsURL);
+            newSimPack.RegionData.SeedCapability = Util.StringToBytes256(capsURL);
 
             // Hack to get this out immediately and skip throttles
             OutPacket(newSimPack, ThrottleOutPacketType.Unknown);
@@ -1765,7 +1132,7 @@ namespace OpenSim.Region.ClientStack.LindenUDP
             teleport.Info.RegionHandle = regionHandle;
             teleport.Info.SimAccess = simAccess;
 
-            teleport.Info.SeedCapability = Utils.StringToBytes(capsURL);
+            teleport.Info.SeedCapability = Util.StringToBytes256(capsURL);
 
             IPAddress oIP = newRegionEndPoint.Address;
             byte[] byteIP = oIP.GetAddressBytes();
@@ -1790,7 +1157,7 @@ namespace OpenSim.Region.ClientStack.LindenUDP
         {
             TeleportFailedPacket tpFailed = (TeleportFailedPacket)PacketPool.Instance.GetPacket(PacketType.TeleportFailed);
             tpFailed.Info.AgentID = AgentId;
-            tpFailed.Info.Reason = Utils.StringToBytes(reason);
+            tpFailed.Info.Reason = Util.StringToBytes256(reason);
             tpFailed.AlertInfo = new TeleportFailedPacket.AlertInfoBlock[0];
 
             // Hack to get this out immediately and skip throttles
@@ -1850,8 +1217,12 @@ namespace OpenSim.Region.ClientStack.LindenUDP
         public void SendStartPingCheck(byte seq)
         {
             StartPingCheckPacket pc = (StartPingCheckPacket)PacketPool.Instance.GetPacket(PacketType.StartPingCheck);
-            pc.PingID.PingID = seq;
             pc.Header.Reliable = false;
+
+            pc.PingID.PingID = seq;
+            // We *could* get OldestUnacked, but it would hurt performance and not provide any benefit
+            pc.PingID.OldestUnacked = 0;
+
             OutPacket(pc, ThrottleOutPacketType.Unknown);
         }
 
@@ -1864,7 +1235,7 @@ namespace OpenSim.Region.ClientStack.LindenUDP
             kill.ObjectData[0].ID = localID;
             kill.Header.Reliable = true;
             kill.Header.Zerocoded = true;
-            OutPacket(kill, ThrottleOutPacketType.Task);
+            OutPacket(kill, ThrottleOutPacketType.State);
         }
 
         /// <summary>
@@ -1927,12 +1298,12 @@ namespace OpenSim.Region.ClientStack.LindenUDP
                     descend.ItemData[i].AssetID = item.AssetID;
                     descend.ItemData[i].CreatorID = item.CreatorIdAsUuid;
                     descend.ItemData[i].BaseMask = item.BasePermissions;
-                    descend.ItemData[i].Description = LLUtil.StringToPacketBytes(item.Description);
+                    descend.ItemData[i].Description = Util.StringToBytes256(item.Description);
                     descend.ItemData[i].EveryoneMask = item.EveryOnePermissions;
                     descend.ItemData[i].OwnerMask = item.CurrentPermissions;
                     descend.ItemData[i].FolderID = item.Folder;
                     descend.ItemData[i].InvType = (sbyte)item.InvType;
-                    descend.ItemData[i].Name = LLUtil.StringToPacketBytes(item.Name);
+                    descend.ItemData[i].Name = Util.StringToBytes256(item.Name);
                     descend.ItemData[i].NextOwnerMask = item.NextPermissions;
                     descend.ItemData[i].OwnerID = item.Owner;
                     descend.ItemData[i].Type = (sbyte)item.AssetType;
@@ -2013,7 +1384,7 @@ namespace OpenSim.Region.ClientStack.LindenUDP
                 {
                     descend.FolderData[i] = new InventoryDescendentsPacket.FolderDataBlock();
                     descend.FolderData[i].FolderID = folder.ID;
-                    descend.FolderData[i].Name = LLUtil.StringToPacketBytes(folder.Name);
+                    descend.FolderData[i].Name = Util.StringToBytes256(folder.Name);
                     descend.FolderData[i].ParentID = folder.ParentID;
                     descend.FolderData[i].Type = (sbyte)folder.Type;
 
@@ -2128,11 +1499,11 @@ namespace OpenSim.Region.ClientStack.LindenUDP
             inventoryReply.InventoryData[0].BaseMask = item.BasePermissions;
             inventoryReply.InventoryData[0].CreationDate = item.CreationDate;
 
-            inventoryReply.InventoryData[0].Description = LLUtil.StringToPacketBytes(item.Description);
+            inventoryReply.InventoryData[0].Description = Util.StringToBytes256(item.Description);
             inventoryReply.InventoryData[0].EveryoneMask = item.EveryOnePermissions;
             inventoryReply.InventoryData[0].FolderID = item.Folder;
             inventoryReply.InventoryData[0].InvType = (sbyte)item.InvType;
-            inventoryReply.InventoryData[0].Name = LLUtil.StringToPacketBytes(item.Name);
+            inventoryReply.InventoryData[0].Name = Util.StringToBytes256(item.Name);
             inventoryReply.InventoryData[0].NextOwnerMask = item.NextPermissions;
             inventoryReply.InventoryData[0].OwnerID = item.Owner;
             inventoryReply.InventoryData[0].OwnerMask = item.CurrentPermissions;
@@ -2157,7 +1528,7 @@ namespace OpenSim.Region.ClientStack.LindenUDP
             inventoryReply.Header.Zerocoded = true;
             OutPacket(inventoryReply, ThrottleOutPacketType.Asset);
         }
-        
+
         protected void SendBulkUpdateInventoryFolder(InventoryFolderBase folderBase)
         {
             // We will use the same transaction id for all the separate packets to be sent out in this update.
@@ -2181,7 +1552,7 @@ namespace OpenSim.Region.ClientStack.LindenUDP
                 bulkUpdate.FolderData = folderDataBlocks.ToArray();
                 List<BulkUpdateInventoryPacket.ItemDataBlock> foo = new List<BulkUpdateInventoryPacket.ItemDataBlock>();
                 bulkUpdate.ItemData = foo.ToArray();
- 
+
                 //m_log.Debug("SendBulkUpdateInventory :" + bulkUpdate);
                 OutPacket(bulkUpdate, ThrottleOutPacketType.Asset);
             }
@@ -2257,7 +1628,7 @@ namespace OpenSim.Region.ClientStack.LindenUDP
             folderBlock.FolderID = folder.ID;
             folderBlock.ParentID = folder.ParentID;
             folderBlock.Type = -1;
-            folderBlock.Name = LLUtil.StringToPacketBytes(folder.Name);
+            folderBlock.Name = Util.StringToBytes256(folder.Name);
 
             return folderBlock;
         }
@@ -2275,11 +1646,11 @@ namespace OpenSim.Region.ClientStack.LindenUDP
             itemBlock.AssetID = item.AssetID;
             itemBlock.CreatorID = item.CreatorIdAsUuid;
             itemBlock.BaseMask = item.BasePermissions;
-            itemBlock.Description = LLUtil.StringToPacketBytes(item.Description);
+            itemBlock.Description = Util.StringToBytes256(item.Description);
             itemBlock.EveryoneMask = item.EveryOnePermissions;
             itemBlock.FolderID = item.Folder;
             itemBlock.InvType = (sbyte)item.InvType;
-            itemBlock.Name = LLUtil.StringToPacketBytes(item.Name);
+            itemBlock.Name = Util.StringToBytes256(item.Name);
             itemBlock.NextOwnerMask = item.NextPermissions;
             itemBlock.OwnerID = item.Owner;
             itemBlock.OwnerMask = item.CurrentPermissions;
@@ -2304,7 +1675,7 @@ namespace OpenSim.Region.ClientStack.LindenUDP
 
             return itemBlock;
         }
-        
+
         public void SendBulkUpdateInventory(InventoryNodeBase node)
         {
             if (node is InventoryItemBase)
@@ -2314,7 +1685,7 @@ namespace OpenSim.Region.ClientStack.LindenUDP
             else
                 m_log.ErrorFormat("[CLIENT]: Client for {0} sent unknown inventory node named {1}", Name, node.Name);
         }
-                
+
         protected void SendBulkUpdateInventoryItem(InventoryItemBase item)
         {
             const uint FULL_MASK_PERMISSIONS = (uint)PermissionMask.All;
@@ -2339,11 +1710,11 @@ namespace OpenSim.Region.ClientStack.LindenUDP
             bulkUpdate.ItemData[0].CreatorID = item.CreatorIdAsUuid;
             bulkUpdate.ItemData[0].BaseMask = item.BasePermissions;
             bulkUpdate.ItemData[0].CreationDate = item.CreationDate;
-            bulkUpdate.ItemData[0].Description = LLUtil.StringToPacketBytes(item.Description);
+            bulkUpdate.ItemData[0].Description = Util.StringToBytes256(item.Description);
             bulkUpdate.ItemData[0].EveryoneMask = item.EveryOnePermissions;
             bulkUpdate.ItemData[0].FolderID = item.Folder;
             bulkUpdate.ItemData[0].InvType = (sbyte)item.InvType;
-            bulkUpdate.ItemData[0].Name = LLUtil.StringToPacketBytes(item.Name);
+            bulkUpdate.ItemData[0].Name = Util.StringToBytes256(item.Name);
             bulkUpdate.ItemData[0].NextOwnerMask = item.NextPermissions;
             bulkUpdate.ItemData[0].OwnerID = item.Owner;
             bulkUpdate.ItemData[0].OwnerMask = item.CurrentPermissions;
@@ -2386,11 +1757,11 @@ namespace OpenSim.Region.ClientStack.LindenUDP
             InventoryReply.InventoryData[0].AssetID = Item.AssetID;
             InventoryReply.InventoryData[0].CreatorID = Item.CreatorIdAsUuid;
             InventoryReply.InventoryData[0].BaseMask = Item.BasePermissions;
-            InventoryReply.InventoryData[0].Description = LLUtil.StringToPacketBytes(Item.Description);
+            InventoryReply.InventoryData[0].Description = Util.StringToBytes256(Item.Description);
             InventoryReply.InventoryData[0].EveryoneMask = Item.EveryOnePermissions;
             InventoryReply.InventoryData[0].FolderID = Item.Folder;
             InventoryReply.InventoryData[0].InvType = (sbyte)Item.InvType;
-            InventoryReply.InventoryData[0].Name = LLUtil.StringToPacketBytes(Item.Name);
+            InventoryReply.InventoryData[0].Name = Util.StringToBytes256(Item.Name);
             InventoryReply.InventoryData[0].NextOwnerMask = Item.NextPermissions;
             InventoryReply.InventoryData[0].OwnerID = Item.Owner;
             InventoryReply.InventoryData[0].OwnerMask = Item.CurrentPermissions;
@@ -2458,7 +1829,7 @@ namespace OpenSim.Region.ClientStack.LindenUDP
             sendXfer.XferID.ID = xferID;
             sendXfer.XferID.Packet = packet;
             sendXfer.DataPacket.Data = data;
-            OutPacket(sendXfer, ThrottleOutPacketType.Task);
+            OutPacket(sendXfer, ThrottleOutPacketType.Asset);
         }
 
         public void SendEconomyData(float EnergyEfficiency, int ObjectCapacity, int ObjectCount, int PriceEnergyUnit,
@@ -2517,11 +1888,11 @@ namespace OpenSim.Region.ClientStack.LindenUDP
             AgentDataUpdatePacket sendAgentDataUpdate = (AgentDataUpdatePacket)PacketPool.Instance.GetPacket(PacketType.AgentDataUpdate);
             sendAgentDataUpdate.AgentData.ActiveGroupID = activegroupid;
             sendAgentDataUpdate.AgentData.AgentID = agentid;
-            sendAgentDataUpdate.AgentData.FirstName = Utils.StringToBytes(firstname);
-            sendAgentDataUpdate.AgentData.GroupName = Utils.StringToBytes(groupname);
+            sendAgentDataUpdate.AgentData.FirstName = Util.StringToBytes256(firstname);
+            sendAgentDataUpdate.AgentData.GroupName = Util.StringToBytes256(groupname);
             sendAgentDataUpdate.AgentData.GroupPowers = grouppowers;
-            sendAgentDataUpdate.AgentData.GroupTitle = Utils.StringToBytes(grouptitle);
-            sendAgentDataUpdate.AgentData.LastName = Utils.StringToBytes(lastname);
+            sendAgentDataUpdate.AgentData.GroupTitle = Util.StringToBytes256(grouptitle);
+            sendAgentDataUpdate.AgentData.LastName = Util.StringToBytes256(lastname);
             OutPacket(sendAgentDataUpdate, ThrottleOutPacketType.Task);
         }
 
@@ -2534,7 +1905,7 @@ namespace OpenSim.Region.ClientStack.LindenUDP
         {
             AlertMessagePacket alertPack = (AlertMessagePacket)PacketPool.Instance.GetPacket(PacketType.AlertMessage);
             alertPack.AlertData = new AlertMessagePacket.AlertDataBlock();
-            alertPack.AlertData.Message = Utils.StringToBytes(message);
+            alertPack.AlertData.Message = Util.StringToBytes256(message);
             alertPack.AlertInfo = new AlertMessagePacket.AlertInfoBlock[0];
             OutPacket(alertPack, ThrottleOutPacketType.Task);
         }
@@ -2557,11 +1928,11 @@ namespace OpenSim.Region.ClientStack.LindenUDP
         /// <param name="message"></param>
         /// <param name="modal"></param>
         /// <returns></returns>
-        protected AgentAlertMessagePacket BuildAgentAlertPacket(string message, bool modal)
+        public AgentAlertMessagePacket BuildAgentAlertPacket(string message, bool modal)
         {
             AgentAlertMessagePacket alertPack = (AgentAlertMessagePacket)PacketPool.Instance.GetPacket(PacketType.AgentAlertMessage);
             alertPack.AgentData.AgentID = AgentId;
-            alertPack.AlertData.Message = Utils.StringToBytes(message);
+            alertPack.AlertData.Message = Util.StringToBytes256(message);
             alertPack.AlertData.Modal = modal;
 
             return alertPack;
@@ -2571,12 +1942,12 @@ namespace OpenSim.Region.ClientStack.LindenUDP
                                 string url)
         {
             LoadURLPacket loadURL = (LoadURLPacket)PacketPool.Instance.GetPacket(PacketType.LoadURL);
-            loadURL.Data.ObjectName = Utils.StringToBytes(objectname);
+            loadURL.Data.ObjectName = Util.StringToBytes256(objectname);
             loadURL.Data.ObjectID = objectID;
             loadURL.Data.OwnerID = ownerID;
             loadURL.Data.OwnerIsGroup = groupOwned;
-            loadURL.Data.Message = Utils.StringToBytes(message);
-            loadURL.Data.URL = Utils.StringToBytes(url);
+            loadURL.Data.Message = Util.StringToBytes256(message);
+            loadURL.Data.URL = Util.StringToBytes256(url);
             OutPacket(loadURL, ThrottleOutPacketType.Task);
         }
 
@@ -2584,18 +1955,18 @@ namespace OpenSim.Region.ClientStack.LindenUDP
         {
             ScriptDialogPacket dialog = (ScriptDialogPacket)PacketPool.Instance.GetPacket(PacketType.ScriptDialog);
             dialog.Data.ObjectID = objectID;
-            dialog.Data.ObjectName = Utils.StringToBytes(objectname);
+            dialog.Data.ObjectName = Util.StringToBytes256(objectname);
             // this is the username of the *owner*
-            dialog.Data.FirstName = Utils.StringToBytes(ownerFirstName);
-            dialog.Data.LastName = Utils.StringToBytes(ownerLastName);
-            dialog.Data.Message = Utils.StringToBytes(msg);
+            dialog.Data.FirstName = Util.StringToBytes256(ownerFirstName);
+            dialog.Data.LastName = Util.StringToBytes256(ownerLastName);
+            dialog.Data.Message = Util.StringToBytes1024(msg);
             dialog.Data.ImageID = textureID;
             dialog.Data.ChatChannel = ch;
             ScriptDialogPacket.ButtonsBlock[] buttons = new ScriptDialogPacket.ButtonsBlock[buttonlabels.Length];
             for (int i = 0; i < buttonlabels.Length; i++)
             {
                 buttons[i] = new ScriptDialogPacket.ButtonsBlock();
-                buttons[i].ButtonLabel = Utils.StringToBytes(buttonlabels[i]);
+                buttons[i].ButtonLabel = Util.StringToBytes256(buttonlabels[i]);
             }
             dialog.Buttons = buttons;
             OutPacket(dialog, ThrottleOutPacketType.Task);
@@ -2740,7 +2111,7 @@ namespace OpenSim.Region.ClientStack.LindenUDP
             packet.AgentData.SessionID = SessionId;
             packet.Header.Reliable = false;
             packet.Header.Zerocoded = true;
-            OutPacket(packet, ThrottleOutPacketType.Task);
+            OutPacket(packet, ThrottleOutPacketType.State);
         }
 
         public void SendAvatarProperties(UUID avatarID, string aboutText, string bornOn, Byte[] charterMember,
@@ -2751,7001 +2122,21 @@ namespace OpenSim.Region.ClientStack.LindenUDP
             avatarReply.AgentData.AgentID = AgentId;
             avatarReply.AgentData.AvatarID = avatarID;
             if (aboutText != null)
-                avatarReply.PropertiesData.AboutText = Utils.StringToBytes(aboutText);
+                avatarReply.PropertiesData.AboutText = Util.StringToBytes1024(aboutText);
             else
-                avatarReply.PropertiesData.AboutText = Utils.StringToBytes("");
-            avatarReply.PropertiesData.BornOn = Utils.StringToBytes(bornOn);
+                avatarReply.PropertiesData.AboutText = Utils.EmptyBytes;
+            avatarReply.PropertiesData.BornOn = Util.StringToBytes256(bornOn);
             avatarReply.PropertiesData.CharterMember = charterMember;
             if (flAbout != null)
-                avatarReply.PropertiesData.FLAboutText = Utils.StringToBytes(flAbout);
+                avatarReply.PropertiesData.FLAboutText = Util.StringToBytes256(flAbout);
             else
-                avatarReply.PropertiesData.FLAboutText = Utils.StringToBytes("");
+                avatarReply.PropertiesData.FLAboutText = Utils.EmptyBytes;
             avatarReply.PropertiesData.Flags = flags;
             avatarReply.PropertiesData.FLImageID = flImageID;
             avatarReply.PropertiesData.ImageID = imageID;
-            avatarReply.PropertiesData.ProfileURL = Utils.StringToBytes(profileURL);
+            avatarReply.PropertiesData.ProfileURL = Util.StringToBytes256(profileURL);
             avatarReply.PropertiesData.PartnerID = partnerID;
             OutPacket(avatarReply, ThrottleOutPacketType.Task);
-        }
-
-        #endregion
-
-        // Gesture
-
-        #region Appearance/ Wearables Methods
-
-        public void SendWearables(AvatarWearable[] wearables, int serial)
-        {
-            AgentWearablesUpdatePacket aw = (AgentWearablesUpdatePacket)PacketPool.Instance.GetPacket(PacketType.AgentWearablesUpdate);
-            aw.AgentData.AgentID = AgentId;
-            aw.AgentData.SerialNum = (uint)serial;
-            aw.AgentData.SessionID = m_sessionId;
-
-            // TODO: don't create new blocks if recycling an old packet
-            aw.WearableData = new AgentWearablesUpdatePacket.WearableDataBlock[13];
-            AgentWearablesUpdatePacket.WearableDataBlock awb;
-            for (int i = 0; i < wearables.Length; i++)
-            {
-                awb = new AgentWearablesUpdatePacket.WearableDataBlock();
-                awb.WearableType = (byte)i;
-                awb.AssetID = wearables[i].AssetID;
-                awb.ItemID = wearables[i].ItemID;
-                aw.WearableData[i] = awb;
-
-//                m_log.DebugFormat(
-//                    "[APPEARANCE]: Sending wearable item/asset {0} {1} (index {2}) for {3}",
-//                    awb.ItemID, awb.AssetID, i, Name);
-            }
-
-            OutPacket(aw, ThrottleOutPacketType.Task);
-        }
-
-        public void SendAppearance(UUID agentID, byte[] visualParams, byte[] textureEntry)
-        {
-            AvatarAppearancePacket avp = (AvatarAppearancePacket)PacketPool.Instance.GetPacket(PacketType.AvatarAppearance);
-            // TODO: don't create new blocks if recycling an old packet
-            avp.VisualParam = new AvatarAppearancePacket.VisualParamBlock[218];
-            avp.ObjectData.TextureEntry = textureEntry;
-
-            AvatarAppearancePacket.VisualParamBlock avblock = null;
-            for (int i = 0; i < visualParams.Length; i++)
-            {
-                avblock = new AvatarAppearancePacket.VisualParamBlock();
-                avblock.ParamValue = visualParams[i];
-                avp.VisualParam[i] = avblock;
-            }
-
-            avp.Sender.IsTrial = false;
-            avp.Sender.ID = agentID;
-            OutPacket(avp, ThrottleOutPacketType.Task);
-        }
-
-        public void SendAnimations(UUID[] animations, int[] seqs, UUID sourceAgentId, UUID[] objectIDs)
-        {
-            //m_log.DebugFormat("[CLIENT]: Sending animations to {0}", Name);
-
-            AvatarAnimationPacket ani = (AvatarAnimationPacket)PacketPool.Instance.GetPacket(PacketType.AvatarAnimation);
-            // TODO: don't create new blocks if recycling an old packet
-            ani.AnimationSourceList = new AvatarAnimationPacket.AnimationSourceListBlock[animations.Length];
-            ani.Sender = new AvatarAnimationPacket.SenderBlock();
-            ani.Sender.ID = sourceAgentId;
-            ani.AnimationList = new AvatarAnimationPacket.AnimationListBlock[animations.Length];
-            ani.PhysicalAvatarEventList = new AvatarAnimationPacket.PhysicalAvatarEventListBlock[0];
-
-            for (int i = 0; i < animations.Length; ++i)
-            {
-                ani.AnimationList[i] = new AvatarAnimationPacket.AnimationListBlock();
-                ani.AnimationList[i].AnimID = animations[i];
-                ani.AnimationList[i].AnimSequenceID = seqs[i];
-
-                ani.AnimationSourceList[i] = new AvatarAnimationPacket.AnimationSourceListBlock();
-                ani.AnimationSourceList[i].ObjectID = objectIDs[i];
-                if (objectIDs[i] == UUID.Zero)
-                    ani.AnimationSourceList[i].ObjectID = sourceAgentId;
-            }
-            ani.Header.Reliable = false;
-            OutPacket(ani, ThrottleOutPacketType.Task);
-        }
-
-        #endregion
-
-        #region Avatar Packet/data sending Methods
-
-        /// <summary>
-        /// send a objectupdate packet with information about the clients avatar
-        /// </summary>
-        public void SendAvatarData(ulong regionHandle, string firstName, string lastName, string grouptitle, UUID avatarID,
-                                   uint avatarLocalID, Vector3 Pos, byte[] textureEntry, uint parentID, Quaternion rotation)
-        {
-            ObjectUpdatePacket objupdate = (ObjectUpdatePacket)PacketPool.Instance.GetPacket(PacketType.ObjectUpdate);
-            // TODO: don't create new blocks if recycling an old packet
-            objupdate.RegionData.RegionHandle = regionHandle;
-            objupdate.RegionData.TimeDilation = ushort.MaxValue;
-            objupdate.ObjectData = new ObjectUpdatePacket.ObjectDataBlock[1];
-            objupdate.ObjectData[0] = CreateDefaultAvatarPacket(textureEntry);
-
-            //give this avatar object a local id and assign the user a name
-            objupdate.ObjectData[0].ID = avatarLocalID;
-            objupdate.ObjectData[0].FullID = avatarID;
-            objupdate.ObjectData[0].ParentID = parentID;
-            objupdate.ObjectData[0].NameValue =
-                Utils.StringToBytes("FirstName STRING RW SV " + firstName + "\nLastName STRING RW SV " + lastName + "\nTitle STRING RW SV " + grouptitle);
-
-            Vector3 pos2 = new Vector3(Pos.X, Pos.Y, Pos.Z);
-            byte[] pb = pos2.GetBytes();
-            Array.Copy(pb, 0, objupdate.ObjectData[0].ObjectData, 16, pb.Length);
-
-            byte[] rot = rotation.GetBytes();
-            Array.Copy(rot, 0, objupdate.ObjectData[0].ObjectData, 52, rot.Length);
-
-            objupdate.Header.Zerocoded = true;
-            OutPacket(objupdate, ThrottleOutPacketType.Task);
-        }
-
-        /// <summary>
-        /// Send a terse positional/rotation/velocity update about an avatar
-        /// to the client.  This avatar can be that of the client itself.
-        /// </summary>
-        public virtual void SendAvatarTerseUpdate(ulong regionHandle,
-                ushort timeDilation, uint localID, Vector3 position,
-                Vector3 velocity, Quaternion rotation, UUID agentid)
-        {
-            if (rotation.X == rotation.Y &&
-                rotation.Y == rotation.Z &&
-                rotation.Z == rotation.W && rotation.W == 0)
-                rotation = Quaternion.Identity;
-
-            ImprovedTerseObjectUpdatePacket.ObjectDataBlock terseBlock =
-                CreateAvatarImprovedBlock(localID, position, velocity,rotation);
-                
-            lock (m_avatarTerseUpdates)
-            {
-                m_avatarTerseUpdates.Add(terseBlock);
-
-                // If packet is full or own movement packet, send it.
-                if (m_avatarTerseUpdates.Count >= m_avatarTerseUpdatesPerPacket)
-                {
-                    ProcessAvatarTerseUpdates(this, null);
-                }
-                else if (m_avatarTerseUpdates.Count == 1)
-                {
-                    lock (m_avatarTerseUpdateTimer)
-                        m_avatarTerseUpdateTimer.Start();
-                }
-            }
-        }
-
-        private void ProcessAvatarTerseUpdates(object sender, ElapsedEventArgs e)
-        {
-            lock (m_avatarTerseUpdates)
-            {
-                ImprovedTerseObjectUpdatePacket terse = (ImprovedTerseObjectUpdatePacket)PacketPool.Instance.GetPacket(PacketType.ImprovedTerseObjectUpdate);
-
-                terse.RegionData = new ImprovedTerseObjectUpdatePacket.RegionDataBlock();
-
-                terse.RegionData.RegionHandle = Scene.RegionInfo.RegionHandle;
-                terse.RegionData.TimeDilation =
-                        (ushort)(Scene.TimeDilation * ushort.MaxValue);
-
-                int max = m_avatarTerseUpdatesPerPacket;
-                if (max > m_avatarTerseUpdates.Count)
-                    max = m_avatarTerseUpdates.Count;
-
-                int count = 0;
-                int size = 0;
-
-                byte[] zerobuffer = new byte[1024];
-                byte[] blockbuffer = new byte[1024];
-
-                for (count = 0 ; count < max ; count++)
-                {
-                    int length = 0;
-                    m_avatarTerseUpdates[count].ToBytes(blockbuffer, ref length);
-                    length = Helpers.ZeroEncode(blockbuffer, length, zerobuffer);
-                    if (size + length > m_packetMTU)
-                        break;
-                    size += length;
-                }
-
-                terse.ObjectData = new ImprovedTerseObjectUpdatePacket.ObjectDataBlock[count];
-
-                for (int i = 0 ; i < count ; i++)
-                {
-                    terse.ObjectData[i] = m_avatarTerseUpdates[0];
-                    m_avatarTerseUpdates.RemoveAt(0);
-                }
-
-                terse.Header.Reliable = false;
-                terse.Header.Zerocoded = true;
-                OutPacket(terse, ThrottleOutPacketType.Task);
-
-                if (m_avatarTerseUpdates.Count == 0)
-                {
-                    lock (m_avatarTerseUpdateTimer)
-                        m_avatarTerseUpdateTimer.Stop();
-                }
-            }
-        }
-
-        public void SendCoarseLocationUpdate(List<UUID> users, List<Vector3> CoarseLocations)
-        {
-            if (!IsActive) return; // We don't need to update inactive clients.
-
-            CoarseLocationUpdatePacket loc = (CoarseLocationUpdatePacket)PacketPool.Instance.GetPacket(PacketType.CoarseLocationUpdate);
-            // TODO: don't create new blocks if recycling an old packet
-            int total = CoarseLocations.Count;
-            CoarseLocationUpdatePacket.IndexBlock ib =
-                new CoarseLocationUpdatePacket.IndexBlock();
-            loc.Location = new CoarseLocationUpdatePacket.LocationBlock[total];
-            loc.AgentData = new CoarseLocationUpdatePacket.AgentDataBlock[total];
-
-            for (int i = 0; i < total; i++)
-            {
-                CoarseLocationUpdatePacket.LocationBlock lb =
-                    new CoarseLocationUpdatePacket.LocationBlock();
-                lb.X = (byte)CoarseLocations[i].X;
-                lb.Y = (byte)CoarseLocations[i].Y;
-
-                lb.Z = CoarseLocations[i].Z > 1024 ? (byte)0 : (byte)(CoarseLocations[i].Z * 0.25);
-                loc.Location[i] = lb;
-                loc.AgentData[i] = new CoarseLocationUpdatePacket.AgentDataBlock();
-                loc.AgentData[i].AgentID = users[i];
-            }
-            ib.You = -1;
-            ib.Prey = -1;
-            loc.Index = ib;
-            loc.Header.Reliable = false;
-            loc.Header.Zerocoded = true;
-
-            OutPacket(loc, ThrottleOutPacketType.Task);
-        }
-
-        #endregion
-
-        #region Primitive Packet/data Sending Methods
-
-        /// <summary>
-        ///
-        /// </summary>
-        /// <param name="localID"></param>
-        /// <param name="rotation"></param>
-        /// <param name="attachPoint"></param>
-        public void AttachObject(uint localID, Quaternion rotation, byte attachPoint, UUID ownerID)
-        {
-            if (attachPoint > 30 && ownerID != AgentId) // Someone else's HUD
-                return;
-
-            ObjectAttachPacket attach = (ObjectAttachPacket)PacketPool.Instance.GetPacket(PacketType.ObjectAttach);
-            // TODO: don't create new blocks if recycling an old packet
-            attach.AgentData.AgentID = AgentId;
-            attach.AgentData.SessionID = m_sessionId;
-            attach.AgentData.AttachmentPoint = attachPoint;
-            attach.ObjectData = new ObjectAttachPacket.ObjectDataBlock[1];
-            attach.ObjectData[0] = new ObjectAttachPacket.ObjectDataBlock();
-            attach.ObjectData[0].ObjectLocalID = localID;
-            attach.ObjectData[0].Rotation = rotation;
-            attach.Header.Zerocoded = true;
-            OutPacket(attach, ThrottleOutPacketType.Task);
-        }
-
-        public void SendPrimitiveToClient(
-                                          ulong regionHandle, ushort timeDilation, uint localID, PrimitiveBaseShape primShape,
-                                          Vector3 pos, Vector3 vel, Vector3 acc, Quaternion rotation, Vector3 rvel,
-                                          uint flags, UUID objectID, UUID ownerID, string text, byte[] color,
-                                          uint parentID, byte[] particleSystem, byte clickAction, byte material)
-        {
-            byte[] textureanim = new byte[0];
-
-            SendPrimitiveToClient(regionHandle, timeDilation, localID, primShape, pos, vel,
-                                  acc, rotation, rvel, flags,
-                                  objectID, ownerID, text, color, parentID, particleSystem,
-                                  clickAction, material, textureanim, false, 0, UUID.Zero, UUID.Zero, 0, 0, 0);
-        }
-
-        public void SendPrimitiveToClient(
-            ulong regionHandle, ushort timeDilation, uint localID, PrimitiveBaseShape primShape,
-            Vector3 pos, Vector3 velocity, Vector3 acceleration, Quaternion rotation, Vector3 rotational_velocity,
-            uint flags,
-            UUID objectID, UUID ownerID, string text, byte[] color, uint parentID, byte[] particleSystem,
-            byte clickAction, byte material, byte[] textureanim, bool attachment, uint AttachPoint, UUID AssetId, UUID SoundId, double SoundGain, byte SoundFlags, double SoundRadius)
-        {
-
-            if (AttachPoint > 30 && ownerID != AgentId) // Someone else's HUD
-                return;
-            if (primShape.PCode == 9 && primShape.State != 0 && parentID == 0)
-                return;
-
-            if (rotation.X == rotation.Y && rotation.Y == rotation.Z && rotation.Z == rotation.W && rotation.W == 0)
-                rotation = Quaternion.Identity;
-
-            ObjectUpdatePacket.ObjectDataBlock objectData = CreatePrimUpdateBlock(primShape, flags);
-
-            objectData.ID = localID;
-            objectData.FullID = objectID;
-            objectData.OwnerID = ownerID;
-
-            objectData.Text = LLUtil.StringToPacketBytes(text);
-            objectData.TextColor[0] = color[0];
-            objectData.TextColor[1] = color[1];
-            objectData.TextColor[2] = color[2];
-            objectData.TextColor[3] = color[3];
-            objectData.ParentID = parentID;
-            objectData.PSBlock = particleSystem;
-            objectData.ClickAction = clickAction;
-            objectData.Material = material;
-            objectData.Flags = 0;
-
-            if (attachment)
-            {
-                // Necessary???
-                objectData.JointAxisOrAnchor = new Vector3(0, 0, 2);
-                objectData.JointPivot = new Vector3(0, 0, 0);
-
-                // Item from inventory???
-                objectData.NameValue =
-                    Utils.StringToBytes("AttachItemID STRING RW SV " + AssetId.Guid);
-                objectData.State = (byte)((AttachPoint % 16) * 16 + (AttachPoint / 16));
-            }
-
-            // Xantor 20080528: Send sound info as well
-            // Xantor 20080530: Zero out everything if there's no SoundId, so zerocompression will work again
-            objectData.Sound = SoundId;
-            if (SoundId == UUID.Zero)
-            {
-                objectData.OwnerID = UUID.Zero;
-                objectData.Gain = 0.0f;
-                objectData.Radius = 0.0f;
-                objectData.Flags = 0;
-            }
-            else
-            {
-                objectData.OwnerID = ownerID;
-                objectData.Gain = (float)SoundGain;
-                objectData.Radius = (float)SoundRadius;
-                objectData.Flags = SoundFlags;
-            }
-
-            byte[] pb = pos.GetBytes();
-            Array.Copy(pb, 0, objectData.ObjectData, 0, pb.Length);
-
-            byte[] vel = velocity.GetBytes();
-            Array.Copy(vel, 0, objectData.ObjectData, pb.Length, vel.Length);
-
-            byte[] rot = rotation.GetBytes();
-            Array.Copy(rot, 0, objectData.ObjectData, 36, rot.Length);
-
-            byte[] rvel = rotational_velocity.GetBytes();
-            Array.Copy(rvel, 0, objectData.ObjectData, 36 + rot.Length, rvel.Length);
-
-            if (textureanim.Length > 0)
-            {
-                objectData.TextureAnim = textureanim;
-            }
-
-            lock (m_primFullUpdates)
-            {
-                if (m_primFullUpdates.Count == 0)
-                    m_primFullUpdateTimer.Start();
-
-                m_primFullUpdates.Add(objectData);
-
-                if (m_primFullUpdates.Count >= m_primFullUpdatesPerPacket)
-                    ProcessPrimFullUpdates(this, null);
-            }
-        }
-
-        void HandleQueueEmpty(ThrottleOutPacketType queue)
-        {
-            switch (queue)
-            {
-                case ThrottleOutPacketType.Texture:
-                    ProcessTextureRequests();
-                    break;
-            }
-        }
-
-        void ProcessTextureRequests()
-        {
-            if (m_imageManager != null)
-                m_imageManager.ProcessImageQueue(m_textureSendLimit, m_textureDataLimit);
-        }
-
-        void ProcessPrimFullUpdates(object sender, ElapsedEventArgs e)
-        {
-            lock (m_primFullUpdates)
-            {
-                if (m_primFullUpdates.Count == 0 && m_primFullUpdateTimer.Enabled)
-                {
-                    lock (m_primFullUpdateTimer)
-                        m_primFullUpdateTimer.Stop();
-
-                    return;
-                }
-
-                ObjectUpdatePacket outPacket =
-                        (ObjectUpdatePacket)PacketPool.Instance.GetPacket(
-                        PacketType.ObjectUpdate);
-
-                outPacket.RegionData.RegionHandle =
-                        Scene.RegionInfo.RegionHandle;
-                outPacket.RegionData.TimeDilation =
-                        (ushort)(Scene.TimeDilation * ushort.MaxValue);
-
-                int max = m_primFullUpdates.Count;
-                if (max > m_primFullUpdatesPerPacket)
-                    max = m_primFullUpdatesPerPacket;
-
-                int count = 0;
-                int size = 0;
-
-                byte[] zerobuffer = new byte[1024];
-                byte[] blockbuffer = new byte[1024];
-
-                for (count = 0 ; count < max ; count++)
-                {
-                    int length = 0;
-                    m_primFullUpdates[count].ToBytes(blockbuffer, ref length);
-                    length = Helpers.ZeroEncode(blockbuffer, length, zerobuffer);
-                    if (size + length > m_packetMTU)
-                        break;
-                    size += length;
-                }
-
-                outPacket.ObjectData =
-                        new ObjectUpdatePacket.ObjectDataBlock[count];
-
-                for (int index = 0 ; index < count ; index++)
-                {
-                    outPacket.ObjectData[index] = m_primFullUpdates[0];
-                    m_primFullUpdates.RemoveAt(0);
-                }
-
-                outPacket.Header.Zerocoded = true;
-                OutPacket(outPacket, ThrottleOutPacketType.Task | ThrottleOutPacketType.LowPriority);
-
-                if (m_primFullUpdates.Count == 0 && m_primFullUpdateTimer.Enabled)
-                    lock (m_primFullUpdateTimer)
-                        m_primFullUpdateTimer.Stop();
-            }
-        }
-
-        /// <summary>
-        ///
-        /// </summary>
-        public void SendPrimTerseUpdate(ulong regionHandle, ushort timeDilation, uint localID, Vector3 position,
-                                        Quaternion rotation, Vector3 velocity, Vector3 rotationalvelocity, byte state, UUID AssetId, UUID ownerID, int attachPoint)
-        {
-            if (attachPoint > 30 && ownerID != AgentId) // Someone else's HUD
-                return;
-
-            if (rotation.X == rotation.Y && rotation.Y == rotation.Z && rotation.Z == rotation.W && rotation.W == 0)
-                rotation = Quaternion.Identity;
-
-            ImprovedTerseObjectUpdatePacket.ObjectDataBlock objectData =
-                    CreatePrimImprovedBlock(localID, position, rotation,
-                    velocity, rotationalvelocity, state);
-
-            lock (m_primTerseUpdates)
-            {
-                if (m_primTerseUpdates.Count == 0)
-                    m_primTerseUpdateTimer.Start();
-
-                m_primTerseUpdates.Add(objectData);
-
-                if (m_primTerseUpdates.Count >= m_primTerseUpdatesPerPacket)
-                    ProcessPrimTerseUpdates(this, null);
-            }
-        }
-
-        void ProcessPrimTerseUpdates(object sender, ElapsedEventArgs e)
-        {
-            lock (m_primTerseUpdates)
-            {
-                if (m_primTerseUpdates.Count == 0)
-                {
-                    lock (m_primTerseUpdateTimer)
-                        m_primTerseUpdateTimer.Stop();
-
-                    return;
-                }
-
-                ImprovedTerseObjectUpdatePacket outPacket =
-                        (ImprovedTerseObjectUpdatePacket)
-                        PacketPool.Instance.GetPacket(
-                        PacketType.ImprovedTerseObjectUpdate);
-
-                outPacket.RegionData.RegionHandle =
-                        Scene.RegionInfo.RegionHandle;
-                outPacket.RegionData.TimeDilation =
-                        (ushort)(Scene.TimeDilation * ushort.MaxValue);
-
-                int max = m_primTerseUpdates.Count;
-                if (max > m_primTerseUpdatesPerPacket)
-                    max = m_primTerseUpdatesPerPacket;
-
-                int count = 0;
-                int size = 0;
-
-                byte[] zerobuffer = new byte[1024];
-                byte[] blockbuffer = new byte[1024];
-
-                for (count = 0 ; count < max ; count++)
-                {
-                    int length = 0;
-                    m_primTerseUpdates[count].ToBytes(blockbuffer, ref length);
-                    length = Helpers.ZeroEncode(blockbuffer, length, zerobuffer);
-                    if (size + length > m_packetMTU)
-                        break;
-                    size += length;
-                }
-
-                outPacket.ObjectData =
-                        new ImprovedTerseObjectUpdatePacket.
-                        ObjectDataBlock[count];
-
-                for (int index = 0 ; index < count ; index++)
-                {
-                    outPacket.ObjectData[index] = m_primTerseUpdates[0];
-                    m_primTerseUpdates.RemoveAt(0);
-                }
-
-                outPacket.Header.Reliable = false;
-                outPacket.Header.Zerocoded = true;
-                OutPacket(outPacket, ThrottleOutPacketType.Task | ThrottleOutPacketType.LowPriority);
-
-                if (m_primTerseUpdates.Count == 0)
-                    lock (m_primTerseUpdateTimer)
-                        m_primTerseUpdateTimer.Stop();
-            }
-        }
-
-        public void FlushPrimUpdates()
-        {
-            while (m_primFullUpdates.Count > 0)
-            {
-                ProcessPrimFullUpdates(this, null);
-            }
-            while (m_primTerseUpdates.Count > 0)
-            {
-                ProcessPrimTerseUpdates(this, null);
-            }
-            while (m_avatarTerseUpdates.Count > 0)
-            {
-                ProcessAvatarTerseUpdates(this, null);
-            }
-        }
-
-        public void SendAssetUploadCompleteMessage(sbyte AssetType, bool Success, UUID AssetFullID)
-        {
-            AssetUploadCompletePacket newPack = new AssetUploadCompletePacket();
-            newPack.AssetBlock.Type = AssetType;
-            newPack.AssetBlock.Success = Success;
-            newPack.AssetBlock.UUID = AssetFullID;
-            newPack.Header.Zerocoded = true;
-            OutPacket(newPack, ThrottleOutPacketType.Asset);
-        }
-
-        public void SendXferRequest(ulong XferID, short AssetType, UUID vFileID, byte FilePath, byte[] FileName)
-        {
-            RequestXferPacket newPack = new RequestXferPacket();
-            newPack.XferID.ID = XferID;
-            newPack.XferID.VFileType = AssetType;
-            newPack.XferID.VFileID = vFileID;
-            newPack.XferID.FilePath = FilePath;
-            newPack.XferID.Filename = FileName;
-            newPack.Header.Zerocoded = true;
-            OutPacket(newPack, ThrottleOutPacketType.Asset);
-        }
-
-        public void SendConfirmXfer(ulong xferID, uint PacketID)
-        {
-            ConfirmXferPacketPacket newPack = new ConfirmXferPacketPacket();
-            newPack.XferID.ID = xferID;
-            newPack.XferID.Packet = PacketID;
-            newPack.Header.Zerocoded = true;
-            OutPacket(newPack, ThrottleOutPacketType.Asset);
-        }
-        
-        public void SendInitiateDownload(string simFileName, string clientFileName)
-        {
-            InitiateDownloadPacket newPack = new InitiateDownloadPacket();
-            newPack.AgentData.AgentID = AgentId;
-            newPack.FileData.SimFilename = Utils.StringToBytes(simFileName);
-            newPack.FileData.ViewerFilename = Utils.StringToBytes(clientFileName);
-            OutPacket(newPack, ThrottleOutPacketType.Asset);
-        }
-        
-        public void SendImageFirstPart(
-            ushort numParts, UUID ImageUUID, uint ImageSize, byte[] ImageData, byte imageCodec)
-        {
-            ImageDataPacket im = new ImageDataPacket();
-            im.Header.Reliable = false;
-            im.ImageID.Packets = numParts;
-            im.ImageID.ID = ImageUUID;
-
-            if (ImageSize > 0)
-                im.ImageID.Size = ImageSize;
-
-            im.ImageData.Data = ImageData;
-            im.ImageID.Codec = imageCodec;
-            im.Header.Zerocoded = true;
-            OutPacket(im, ThrottleOutPacketType.Texture);
-        }
-
-        public void SendImageNextPart(ushort partNumber, UUID imageUuid, byte[] imageData)
-        {
-            ImagePacketPacket im = new ImagePacketPacket();
-            im.Header.Reliable = false;
-            im.ImageID.Packet = partNumber;
-            im.ImageID.ID = imageUuid;
-            im.ImageData.Data = imageData;
-
-            OutPacket(im, ThrottleOutPacketType.Texture);
-        }
-
-        public void SendImageNotFound(UUID imageid)
-        {
-            ImageNotInDatabasePacket notFoundPacket
-            = (ImageNotInDatabasePacket)PacketPool.Instance.GetPacket(PacketType.ImageNotInDatabase);
-
-            notFoundPacket.ImageID.ID = imageid;
-
-            OutPacket(notFoundPacket, ThrottleOutPacketType.Texture);
-        }
-
-        public void SendShutdownConnectionNotice()
-        {
-            OutPacket(PacketPool.Instance.GetPacket(PacketType.DisableSimulator), ThrottleOutPacketType.Unknown);
-        }
-
-        public void SendSimStats(SimStats stats)
-        {
-            SimStatsPacket pack = new SimStatsPacket();
-            pack.Region = new SimStatsPacket.RegionBlock();
-            pack.Region.RegionX = stats.RegionX;
-            pack.Region.RegionY = stats.RegionY;
-            pack.Region.RegionFlags = stats.RegionFlags;
-            pack.Region.ObjectCapacity = stats.ObjectCapacity;
-            //pack.Region = //stats.RegionBlock;
-            pack.Stat = stats.StatsBlock;
-
-            pack.Header.Reliable = false;
-
-            OutPacket(pack, ThrottleOutPacketType.Task);
-        }
-
-        public void SendObjectPropertiesFamilyData(uint RequestFlags, UUID ObjectUUID, UUID OwnerID, UUID GroupID,
-                                                    uint BaseMask, uint OwnerMask, uint GroupMask, uint EveryoneMask,
-                                                    uint NextOwnerMask, int OwnershipCost, byte SaleType, int SalePrice, uint Category,
-                                                    UUID LastOwnerID, string ObjectName, string Description)
-        {
-            ObjectPropertiesFamilyPacket objPropFamilyPack = (ObjectPropertiesFamilyPacket)PacketPool.Instance.GetPacket(PacketType.ObjectPropertiesFamily);
-            // TODO: don't create new blocks if recycling an old packet
-
-            ObjectPropertiesFamilyPacket.ObjectDataBlock objPropDB = new ObjectPropertiesFamilyPacket.ObjectDataBlock();
-            objPropDB.RequestFlags = RequestFlags;
-            objPropDB.ObjectID = ObjectUUID;
-            if (OwnerID == GroupID)
-                objPropDB.OwnerID = UUID.Zero;
-            else
-                objPropDB.OwnerID = OwnerID;
-            objPropDB.GroupID = GroupID;
-            objPropDB.BaseMask = BaseMask;
-            objPropDB.OwnerMask = OwnerMask;
-            objPropDB.GroupMask = GroupMask;
-            objPropDB.EveryoneMask = EveryoneMask;
-            objPropDB.NextOwnerMask = NextOwnerMask;
-
-            // TODO: More properties are needed in SceneObjectPart!
-            objPropDB.OwnershipCost = OwnershipCost;
-            objPropDB.SaleType = SaleType;
-            objPropDB.SalePrice = SalePrice;
-            objPropDB.Category = Category;
-            objPropDB.LastOwnerID = LastOwnerID;
-            objPropDB.Name = LLUtil.StringToPacketBytes(ObjectName);
-            objPropDB.Description = LLUtil.StringToPacketBytes(Description);
-            objPropFamilyPack.ObjectData = objPropDB;
-            objPropFamilyPack.Header.Zerocoded = true;
-            OutPacket(objPropFamilyPack, ThrottleOutPacketType.Task);
-        }
-
-        public void SendObjectPropertiesReply(
-            UUID ItemID, ulong CreationDate, UUID CreatorUUID, UUID FolderUUID, UUID FromTaskUUID,
-            UUID GroupUUID, short InventorySerial, UUID LastOwnerUUID, UUID ObjectUUID,
-            UUID OwnerUUID, string TouchTitle, byte[] TextureID, string SitTitle, string ItemName,
-            string ItemDescription, uint OwnerMask, uint NextOwnerMask, uint GroupMask, uint EveryoneMask,
-            uint BaseMask, byte saleType, int salePrice)
-        {
-            ObjectPropertiesPacket proper = (ObjectPropertiesPacket)PacketPool.Instance.GetPacket(PacketType.ObjectProperties);
-            // TODO: don't create new blocks if recycling an old packet
-
-            proper.ObjectData = new ObjectPropertiesPacket.ObjectDataBlock[1];
-            proper.ObjectData[0] = new ObjectPropertiesPacket.ObjectDataBlock();
-            proper.ObjectData[0].ItemID = ItemID;
-            proper.ObjectData[0].CreationDate = CreationDate;
-            proper.ObjectData[0].CreatorID = CreatorUUID;
-            proper.ObjectData[0].FolderID = FolderUUID;
-            proper.ObjectData[0].FromTaskID = FromTaskUUID;
-            proper.ObjectData[0].GroupID = GroupUUID;
-            proper.ObjectData[0].InventorySerial = InventorySerial;
-
-            proper.ObjectData[0].LastOwnerID = LastOwnerUUID;
-            //            proper.ObjectData[0].LastOwnerID = UUID.Zero;
-
-            proper.ObjectData[0].ObjectID = ObjectUUID;
-            if (OwnerUUID == GroupUUID)
-                proper.ObjectData[0].OwnerID = UUID.Zero;
-            else
-                proper.ObjectData[0].OwnerID = OwnerUUID;
-            proper.ObjectData[0].TouchName = LLUtil.StringToPacketBytes(TouchTitle);
-            proper.ObjectData[0].TextureID = TextureID;
-            proper.ObjectData[0].SitName = LLUtil.StringToPacketBytes(SitTitle);
-            proper.ObjectData[0].Name = LLUtil.StringToPacketBytes(ItemName);
-            proper.ObjectData[0].Description = LLUtil.StringToPacketBytes(ItemDescription);
-            proper.ObjectData[0].OwnerMask = OwnerMask;
-            proper.ObjectData[0].NextOwnerMask = NextOwnerMask;
-            proper.ObjectData[0].GroupMask = GroupMask;
-            proper.ObjectData[0].EveryoneMask = EveryoneMask;
-            proper.ObjectData[0].BaseMask = BaseMask;
-            //            proper.ObjectData[0].AggregatePerms = 53;
-            //            proper.ObjectData[0].AggregatePermTextures = 0;
-            //            proper.ObjectData[0].AggregatePermTexturesOwner = 0;
-            proper.ObjectData[0].SaleType = saleType;
-            proper.ObjectData[0].SalePrice = salePrice;
-            proper.Header.Zerocoded = true;
-            OutPacket(proper, ThrottleOutPacketType.Task);
-        }
-
-        #endregion
-
-        #region Estate Data Sending Methods
-
-        private static bool convertParamStringToBool(byte[] field)
-        {
-            string s = Utils.BytesToString(field);
-            if (s == "1" || s.ToLower() == "y" || s.ToLower() == "yes" || s.ToLower() == "t" || s.ToLower() == "true")
-            {
-                return true;
-            }
-            return false;
-        }
-
-        public void SendEstateManagersList(UUID invoice, UUID[] EstateManagers, uint estateID)
-        {
-            EstateOwnerMessagePacket packet = new EstateOwnerMessagePacket();
-            packet.AgentData.TransactionID = UUID.Random();
-            packet.AgentData.AgentID = AgentId;
-            packet.AgentData.SessionID = SessionId;
-            packet.MethodData.Invoice = invoice;
-            packet.MethodData.Method = Utils.StringToBytes("setaccess");
-
-            EstateOwnerMessagePacket.ParamListBlock[] returnblock = new EstateOwnerMessagePacket.ParamListBlock[6 + EstateManagers.Length];
-
-            for (int i = 0; i < (6 + EstateManagers.Length); i++)
-            {
-                returnblock[i] = new EstateOwnerMessagePacket.ParamListBlock();
-            }
-            int j = 0;
-
-            returnblock[j].Parameter = Utils.StringToBytes(estateID.ToString()); j++;
-            returnblock[j].Parameter = Utils.StringToBytes(((int)Constants.EstateAccessCodex.EstateManagers).ToString()); j++;
-            returnblock[j].Parameter = Utils.StringToBytes("0"); j++;
-            returnblock[j].Parameter = Utils.StringToBytes("0"); j++;
-            returnblock[j].Parameter = Utils.StringToBytes("0"); j++;
-            returnblock[j].Parameter = Utils.StringToBytes(EstateManagers.Length.ToString()); j++;
-            for (int i = 0; i < EstateManagers.Length; i++)
-            {
-                returnblock[j].Parameter = EstateManagers[i].GetBytes(); j++;
-            }
-            packet.ParamList = returnblock;
-            packet.Header.Reliable = false;
-            OutPacket(packet, ThrottleOutPacketType.Task);
-        }
-
-        public void SendBannedUserList(UUID invoice, EstateBan[] bl, uint estateID)
-        {
-            List<UUID>BannedUsers = new List<UUID>();
-
-            for (int i = 0; i < bl.Length; i++)
-            {
-                if (bl[i] == null)
-                    continue;
-                if (bl[i].BannedUserID == UUID.Zero)
-                    continue;
-                BannedUsers.Add(bl[i].BannedUserID);
-            }
-
-            EstateOwnerMessagePacket packet = new EstateOwnerMessagePacket();
-            packet.AgentData.TransactionID = UUID.Random();
-            packet.AgentData.AgentID = AgentId;
-            packet.AgentData.SessionID = SessionId;
-            packet.MethodData.Invoice = invoice;
-            packet.MethodData.Method = Utils.StringToBytes("setaccess");
-
-            EstateOwnerMessagePacket.ParamListBlock[] returnblock = new EstateOwnerMessagePacket.ParamListBlock[6 + BannedUsers.Count];
-
-            for (int i = 0; i < (6 + BannedUsers.Count); i++)
-            {
-                returnblock[i] = new EstateOwnerMessagePacket.ParamListBlock();
-            }
-            int j = 0;
-
-            returnblock[j].Parameter = Utils.StringToBytes(estateID.ToString()); j++;
-            returnblock[j].Parameter = Utils.StringToBytes(((int)Constants.EstateAccessCodex.EstateBans).ToString()); j++;
-            returnblock[j].Parameter = Utils.StringToBytes("0"); j++;
-            returnblock[j].Parameter = Utils.StringToBytes("0"); j++;
-            returnblock[j].Parameter = Utils.StringToBytes(BannedUsers.Count.ToString()); j++;
-            returnblock[j].Parameter = Utils.StringToBytes("0"); j++;
-
-            foreach (UUID banned in BannedUsers)
-            {
-                returnblock[j].Parameter = banned.GetBytes(); j++;
-            }
-            packet.ParamList = returnblock;
-            packet.Header.Reliable = false;
-            OutPacket(packet, ThrottleOutPacketType.Task);
-        }
-
-        public void SendRegionInfoToEstateMenu(RegionInfoForEstateMenuArgs args)
-        {
-            RegionInfoPacket rinfopack = new RegionInfoPacket();
-            RegionInfoPacket.RegionInfoBlock rinfoblk = new RegionInfoPacket.RegionInfoBlock();
-            rinfopack.AgentData.AgentID = AgentId;
-            rinfopack.AgentData.SessionID = SessionId;
-            rinfoblk.BillableFactor = args.billableFactor;
-            rinfoblk.EstateID = args.estateID;
-            rinfoblk.MaxAgents = args.maxAgents;
-            rinfoblk.ObjectBonusFactor = args.objectBonusFactor;
-            rinfoblk.ParentEstateID = args.parentEstateID;
-            rinfoblk.PricePerMeter = args.pricePerMeter;
-            rinfoblk.RedirectGridX = args.redirectGridX;
-            rinfoblk.RedirectGridY = args.redirectGridY;
-            rinfoblk.RegionFlags = args.regionFlags;
-            rinfoblk.SimAccess = args.simAccess;
-            rinfoblk.SunHour = args.sunHour;
-            rinfoblk.TerrainLowerLimit = args.terrainLowerLimit;
-            rinfoblk.TerrainRaiseLimit = args.terrainRaiseLimit;
-            rinfoblk.UseEstateSun = args.useEstateSun;
-            rinfoblk.WaterHeight = args.waterHeight;
-            rinfoblk.SimName = Utils.StringToBytes(args.simName);
-            
-            rinfopack.RegionInfo2 = new RegionInfoPacket.RegionInfo2Block();
-            rinfopack.RegionInfo2.HardMaxAgents = uint.MaxValue;
-            rinfopack.RegionInfo2.HardMaxObjects = uint.MaxValue;
-            rinfopack.RegionInfo2.MaxAgents32 = uint.MaxValue;
-            rinfopack.RegionInfo2.ProductName = Utils.EmptyBytes;
-            rinfopack.RegionInfo2.ProductSKU = Utils.EmptyBytes;
-
-            rinfopack.HasVariableBlocks = true;
-            rinfopack.RegionInfo = rinfoblk;
-            rinfopack.AgentData = new RegionInfoPacket.AgentDataBlock();
-            rinfopack.AgentData.AgentID = AgentId;
-            rinfopack.AgentData.SessionID = SessionId;
-
-
-            OutPacket(rinfopack, ThrottleOutPacketType.Task);
-        }
-
-        public void SendEstateCovenantInformation(UUID covenant)
-        {
-            EstateCovenantReplyPacket einfopack = new EstateCovenantReplyPacket();
-            EstateCovenantReplyPacket.DataBlock edata = new EstateCovenantReplyPacket.DataBlock();
-            edata.CovenantID = covenant;
-            edata.CovenantTimestamp = 0;
-            if (m_scene.RegionInfo.EstateSettings.EstateOwner != UUID.Zero)
-                edata.EstateOwnerID = m_scene.RegionInfo.EstateSettings.EstateOwner;
-            else
-                edata.EstateOwnerID = m_scene.RegionInfo.MasterAvatarAssignedUUID;
-            edata.EstateName = Utils.StringToBytes(m_scene.RegionInfo.EstateSettings.EstateName);
-            einfopack.Data = edata;
-            OutPacket(einfopack, ThrottleOutPacketType.Task);
-        }
-
-        public void SendDetailedEstateData(UUID invoice, string estateName, uint estateID, uint parentEstate, uint estateFlags, uint sunPosition, UUID covenant, string abuseEmail, UUID estateOwner)
-        {
-            EstateOwnerMessagePacket packet = new EstateOwnerMessagePacket();
-            packet.MethodData.Invoice = invoice;
-            packet.AgentData.TransactionID = UUID.Random();
-            packet.MethodData.Method = Utils.StringToBytes("estateupdateinfo");
-            EstateOwnerMessagePacket.ParamListBlock[] returnblock = new EstateOwnerMessagePacket.ParamListBlock[10];
-
-            for (int i = 0; i < 10; i++)
-            {
-                returnblock[i] = new EstateOwnerMessagePacket.ParamListBlock();
-            }
-
-            //Sending Estate Settings
-            returnblock[0].Parameter = Utils.StringToBytes(estateName);
-            // TODO: remove this cruft once MasterAvatar is fully deprecated
-            //
-            returnblock[1].Parameter = Utils.StringToBytes(estateOwner.ToString());
-            returnblock[2].Parameter = Utils.StringToBytes(estateID.ToString());
-
-            returnblock[3].Parameter = Utils.StringToBytes(estateFlags.ToString());
-            returnblock[4].Parameter = Utils.StringToBytes(sunPosition.ToString());
-            returnblock[5].Parameter = Utils.StringToBytes(parentEstate.ToString());
-            returnblock[6].Parameter = Utils.StringToBytes(covenant.ToString());
-            returnblock[7].Parameter = Utils.StringToBytes("1160895077"); // what is this?
-            returnblock[8].Parameter = Utils.StringToBytes("1"); // what is this?
-            returnblock[9].Parameter = Utils.StringToBytes(abuseEmail);
-
-            packet.ParamList = returnblock;
-            packet.Header.Reliable = false;
-            //m_log.Debug("[ESTATE]: SIM--->" + packet.ToString());
-            OutPacket(packet, ThrottleOutPacketType.Task);
-        }
-
-        #endregion
-
-        #region Land Data Sending Methods
-
-        public void SendLandParcelOverlay(byte[] data, int sequence_id)
-        {
-            ParcelOverlayPacket packet = (ParcelOverlayPacket)PacketPool.Instance.GetPacket(PacketType.ParcelOverlay);
-            packet.ParcelData.Data = data;
-            packet.ParcelData.SequenceID = sequence_id;
-            packet.Header.Zerocoded = true;
-            OutPacket(packet, ThrottleOutPacketType.Task);
-        }
-
-        public void SendLandProperties(int sequence_id, bool snap_selection, int request_result, LandData landData, float simObjectBonusFactor, int parcelObjectCapacity, int simObjectCapacity, uint regionFlags)
-        {
-            ParcelPropertiesPacket updatePacket = (ParcelPropertiesPacket)PacketPool.Instance.GetPacket(PacketType.ParcelProperties);
-            // TODO: don't create new blocks if recycling an old packet
-
-            updatePacket.ParcelData.AABBMax = landData.AABBMax;
-            updatePacket.ParcelData.AABBMin = landData.AABBMin;
-            updatePacket.ParcelData.Area = landData.Area;
-            updatePacket.ParcelData.AuctionID = landData.AuctionID;
-            updatePacket.ParcelData.AuthBuyerID = landData.AuthBuyerID;
-
-            updatePacket.ParcelData.Bitmap = landData.Bitmap;
-
-            updatePacket.ParcelData.Desc = Utils.StringToBytes(landData.Description);
-            updatePacket.ParcelData.Category = (byte)landData.Category;
-            updatePacket.ParcelData.ClaimDate = landData.ClaimDate;
-            updatePacket.ParcelData.ClaimPrice = landData.ClaimPrice;
-            updatePacket.ParcelData.GroupID = landData.GroupID;
-            updatePacket.ParcelData.GroupPrims = landData.GroupPrims;
-            updatePacket.ParcelData.IsGroupOwned = landData.IsGroupOwned;
-            updatePacket.ParcelData.LandingType = landData.LandingType;
-            updatePacket.ParcelData.LocalID = landData.LocalID;
-
-            if (landData.Area > 0)
-            {
-                updatePacket.ParcelData.MaxPrims = parcelObjectCapacity;
-            }
-            else
-            {
-                updatePacket.ParcelData.MaxPrims = 0;
-            }
-
-            updatePacket.ParcelData.MediaAutoScale = landData.MediaAutoScale;
-            updatePacket.ParcelData.MediaID = landData.MediaID;
-            updatePacket.ParcelData.MediaURL = LLUtil.StringToPacketBytes(landData.MediaURL);
-            updatePacket.ParcelData.MusicURL = LLUtil.StringToPacketBytes(landData.MusicURL);
-            updatePacket.ParcelData.Name = Utils.StringToBytes(landData.Name);
-            updatePacket.ParcelData.OtherCleanTime = landData.OtherCleanTime;
-            updatePacket.ParcelData.OtherCount = 0; //unemplemented
-            updatePacket.ParcelData.OtherPrims = landData.OtherPrims;
-            updatePacket.ParcelData.OwnerID = landData.OwnerID;
-            updatePacket.ParcelData.OwnerPrims = landData.OwnerPrims;
-            updatePacket.ParcelData.ParcelFlags = landData.Flags;
-            updatePacket.ParcelData.ParcelPrimBonus = simObjectBonusFactor;
-            updatePacket.ParcelData.PassHours = landData.PassHours;
-            updatePacket.ParcelData.PassPrice = landData.PassPrice;
-            updatePacket.ParcelData.PublicCount = 0; //unemplemented
-
-            updatePacket.ParcelData.RegionDenyAnonymous = ((regionFlags & (uint)RegionFlags.DenyAnonymous) >
-                                                           0);
-            updatePacket.ParcelData.RegionDenyIdentified = ((regionFlags & (uint)RegionFlags.DenyIdentified) >
-                                                            0);
-            updatePacket.ParcelData.RegionDenyTransacted = ((regionFlags & (uint)RegionFlags.DenyTransacted) >
-                                                            0);
-            updatePacket.ParcelData.RegionPushOverride = ((regionFlags & (uint)RegionFlags.RestrictPushObject) >
-                                                          0);
-
-            updatePacket.ParcelData.RentPrice = 0;
-            updatePacket.ParcelData.RequestResult = request_result;
-            updatePacket.ParcelData.SalePrice = landData.SalePrice;
-            updatePacket.ParcelData.SelectedPrims = landData.SelectedPrims;
-            updatePacket.ParcelData.SelfCount = 0; //unemplemented
-            updatePacket.ParcelData.SequenceID = sequence_id;
-            if (landData.SimwideArea > 0)
-            {
-                updatePacket.ParcelData.SimWideMaxPrims = parcelObjectCapacity;
-            }
-            else
-            {
-                updatePacket.ParcelData.SimWideMaxPrims = 0;
-            }
-            updatePacket.ParcelData.SimWideTotalPrims = landData.SimwidePrims;
-            updatePacket.ParcelData.SnapSelection = snap_selection;
-            updatePacket.ParcelData.SnapshotID = landData.SnapshotID;
-            updatePacket.ParcelData.Status = (byte)landData.Status;
-            updatePacket.ParcelData.TotalPrims = landData.OwnerPrims + landData.GroupPrims + landData.OtherPrims +
-                                                 landData.SelectedPrims;
-            updatePacket.ParcelData.UserLocation = landData.UserLocation;
-            updatePacket.ParcelData.UserLookAt = landData.UserLookAt;
-            updatePacket.Header.Zerocoded = true;
-
-            try
-            {
-                IEventQueue eq = Scene.RequestModuleInterface<IEventQueue>();
-                if (eq != null)
-                {
-                    eq.ParcelProperties(updatePacket, this.AgentId);
-                }
-            }
-            catch (Exception ex)
-            {
-                m_log.Error("Unable to send parcel data via eventqueue - exception: " + ex.ToString());
-                m_log.Warn("sending parcel data via UDP");
-                OutPacket(updatePacket, ThrottleOutPacketType.Task);
-            }
-        }
-
-        public void SendLandAccessListData(List<UUID> avatars, uint accessFlag, int localLandID)
-        {
-            ParcelAccessListReplyPacket replyPacket = (ParcelAccessListReplyPacket)PacketPool.Instance.GetPacket(PacketType.ParcelAccessListReply);
-            replyPacket.Data.AgentID = AgentId;
-            replyPacket.Data.Flags = accessFlag;
-            replyPacket.Data.LocalID = localLandID;
-            replyPacket.Data.SequenceID = 0;
-
-            List<ParcelAccessListReplyPacket.ListBlock> list = new List<ParcelAccessListReplyPacket.ListBlock>();
-            foreach (UUID avatar in avatars)
-            {
-                ParcelAccessListReplyPacket.ListBlock block = new ParcelAccessListReplyPacket.ListBlock();
-                block.Flags = accessFlag;
-                block.ID = avatar;
-                block.Time = 0;
-                list.Add(block);
-            }
-
-            replyPacket.List = list.ToArray();
-            replyPacket.Header.Zerocoded = true;
-            OutPacket(replyPacket, ThrottleOutPacketType.Task);
-        }
-
-        public void SendForceClientSelectObjects(List<uint> ObjectIDs)
-        {
-            bool firstCall = true;
-            const int MAX_OBJECTS_PER_PACKET = 251;
-            ForceObjectSelectPacket pack = (ForceObjectSelectPacket)PacketPool.Instance.GetPacket(PacketType.ForceObjectSelect);
-            ForceObjectSelectPacket.DataBlock[] data;
-            while (ObjectIDs.Count > 0)
-            {
-                if (firstCall)
-                {
-                    pack._Header.ResetList = true;
-                    firstCall = false;
-                }
-                else
-                {
-                    pack._Header.ResetList = false;
-                }
-
-                if (ObjectIDs.Count > MAX_OBJECTS_PER_PACKET)
-                {
-                    data = new ForceObjectSelectPacket.DataBlock[MAX_OBJECTS_PER_PACKET];
-                }
-                else
-                {
-                    data = new ForceObjectSelectPacket.DataBlock[ObjectIDs.Count];
-                }
-
-                int i;
-                for (i = 0; i < MAX_OBJECTS_PER_PACKET && ObjectIDs.Count > 0; i++)
-                {
-                    data[i] = new ForceObjectSelectPacket.DataBlock();
-                    data[i].LocalID = Convert.ToUInt32(ObjectIDs[0]);
-                    ObjectIDs.RemoveAt(0);
-                }
-                pack.Data = data;
-                pack.Header.Zerocoded = true;
-                OutPacket(pack, ThrottleOutPacketType.Task);
-            }
-        }
-
-        public void SendCameraConstraint(Vector4 ConstraintPlane)
-        {
-            CameraConstraintPacket cpack = (CameraConstraintPacket)PacketPool.Instance.GetPacket(PacketType.CameraConstraint);
-            cpack.CameraCollidePlane = new CameraConstraintPacket.CameraCollidePlaneBlock();
-            cpack.CameraCollidePlane.Plane = ConstraintPlane;
-            //m_log.DebugFormat("[CLIENTVIEW]: Constraint {0}", ConstraintPlane);
-            OutPacket(cpack, ThrottleOutPacketType.Task);
-        }
-
-        public void SendLandObjectOwners(LandData land, List<UUID> groups, Dictionary<UUID, int> ownersAndCount)
-        {
-            
-
-            int notifyCount = ownersAndCount.Count;
-            ParcelObjectOwnersReplyPacket pack = (ParcelObjectOwnersReplyPacket)PacketPool.Instance.GetPacket(PacketType.ParcelObjectOwnersReply);
-
-            if (notifyCount > 0)
-            {
-                if (notifyCount > 32)
-                {
-                    m_log.InfoFormat(
-                        "[LAND]: More than {0} avatars own prims on this parcel.  Only sending back details of first {0}"
-                        + " - a developer might want to investigate whether this is a hard limit", 32);
-
-                    notifyCount = 32;
-                }
-
-                ParcelObjectOwnersReplyPacket.DataBlock[] dataBlock
-                    = new ParcelObjectOwnersReplyPacket.DataBlock[notifyCount];
-
-                int num = 0;
-                foreach (UUID owner in ownersAndCount.Keys)
-                {
-                    dataBlock[num] = new ParcelObjectOwnersReplyPacket.DataBlock();
-                    dataBlock[num].Count = ownersAndCount[owner];
-
-                    if (land.GroupID == owner || groups.Contains(owner))
-                        dataBlock[num].IsGroupOwned = true;
-
-                    dataBlock[num].OnlineStatus = true; //TODO: fix me later
-                    dataBlock[num].OwnerID = owner;
-
-                    num++;
-
-                    if (num >= notifyCount)
-                    {
-                        break;
-                    }
-                }
-
-                pack.Data = dataBlock;
-            }
-            pack.Header.Zerocoded = true;
-            this.OutPacket(pack, ThrottleOutPacketType.Task);
-        }
-
-        #endregion
-
-        #region Helper Methods
-
-        protected ImprovedTerseObjectUpdatePacket.ObjectDataBlock CreateAvatarImprovedBlock(uint localID, Vector3 pos,
-                                                                                            Vector3 velocity,
-                                                                                            Quaternion rotation)
-        {
-            byte[] bytes = new byte[60];
-            int i = 0;
-            ImprovedTerseObjectUpdatePacket.ObjectDataBlock dat = PacketPool.GetDataBlock<ImprovedTerseObjectUpdatePacket.ObjectDataBlock>();
-
-            dat.TextureEntry = new byte[0]; // AvatarTemplate.TextureEntry;
-
-            uint ID = localID;
-
-            bytes[i++] = (byte)(ID % 256);
-            bytes[i++] = (byte)((ID >> 8) % 256);
-            bytes[i++] = (byte)((ID >> 16) % 256);
-            bytes[i++] = (byte)((ID >> 24) % 256);
-            bytes[i++] = 0;
-            bytes[i++] = 1;
-            i += 14;
-            bytes[i++] = 128;
-            bytes[i++] = 63;
-
-            byte[] pb = pos.GetBytes();
-            Array.Copy(pb, 0, bytes, i, pb.Length);
-            i += 12;
-
-            Vector3 internDirec = new Vector3(velocity.X, velocity.Y, velocity.Z);
-
-            internDirec = internDirec / 128.0f;
-            internDirec.X += 1;
-            internDirec.Y += 1;
-            internDirec.Z += 1;
-
-            ushort InternVelocityX = (ushort)(32768 * internDirec.X);
-            ushort InternVelocityY = (ushort)(32768 * internDirec.Y);
-            ushort InternVelocityZ = (ushort)(32768 * internDirec.Z);
-
-            ushort ac = 32767;
-            bytes[i++] = (byte)(InternVelocityX % 256);
-            bytes[i++] = (byte)((InternVelocityX >> 8) % 256);
-            bytes[i++] = (byte)(InternVelocityY % 256);
-            bytes[i++] = (byte)((InternVelocityY >> 8) % 256);
-            bytes[i++] = (byte)(InternVelocityZ % 256);
-            bytes[i++] = (byte)((InternVelocityZ >> 8) % 256);
-
-            //accel
-            bytes[i++] = (byte)(ac % 256);
-            bytes[i++] = (byte)((ac >> 8) % 256);
-            bytes[i++] = (byte)(ac % 256);
-            bytes[i++] = (byte)((ac >> 8) % 256);
-            bytes[i++] = (byte)(ac % 256);
-            bytes[i++] = (byte)((ac >> 8) % 256);
-
-            //rotation
-            ushort rw, rx, ry, rz;
-            rw = (ushort)(32768 * (rotation.W + 1));
-            rx = (ushort)(32768 * (rotation.X + 1));
-            ry = (ushort)(32768 * (rotation.Y + 1));
-            rz = (ushort)(32768 * (rotation.Z + 1));
-
-            //rot
-            bytes[i++] = (byte)(rx % 256);
-            bytes[i++] = (byte)((rx >> 8) % 256);
-            bytes[i++] = (byte)(ry % 256);
-            bytes[i++] = (byte)((ry >> 8) % 256);
-            bytes[i++] = (byte)(rz % 256);
-            bytes[i++] = (byte)((rz >> 8) % 256);
-            bytes[i++] = (byte)(rw % 256);
-            bytes[i++] = (byte)((rw >> 8) % 256);
-
-            //rotation vel
-            bytes[i++] = (byte)(ac % 256);
-            bytes[i++] = (byte)((ac >> 8) % 256);
-            bytes[i++] = (byte)(ac % 256);
-            bytes[i++] = (byte)((ac >> 8) % 256);
-            bytes[i++] = (byte)(ac % 256);
-            bytes[i++] = (byte)((ac >> 8) % 256);
-
-            dat.Data = bytes;
-
-            return (dat);
-        }
-
-        /// <summary>
-        ///
-        /// </summary>
-        /// <param name="localID"></param>
-        /// <param name="position"></param>
-        /// <param name="rotation"></param>
-        /// <returns></returns>
-        protected ImprovedTerseObjectUpdatePacket.ObjectDataBlock CreatePrimImprovedBlock(uint localID,
-                                                                                          Vector3 position,
-                                                                                          Quaternion rotation,
-                                                                                          Vector3 velocity,
-                                                                                          Vector3 rotationalvelocity,
-                                                                                          byte state)
-        {
-            uint ID = localID;
-            byte[] bytes = new byte[60];
-
-            int i = 0;
-            ImprovedTerseObjectUpdatePacket.ObjectDataBlock dat = PacketPool.GetDataBlock<ImprovedTerseObjectUpdatePacket.ObjectDataBlock>();
-            dat.TextureEntry = new byte[0];
-            bytes[i++] = (byte)(ID % 256);
-            bytes[i++] = (byte)((ID >> 8) % 256);
-            bytes[i++] = (byte)((ID >> 16) % 256);
-            bytes[i++] = (byte)((ID >> 24) % 256);
-            bytes[i++] = (byte)(((state & 0xf0) >> 4) | ((state & 0x0f) << 4));
-            bytes[i++] = 0;
-
-            byte[] pb = position.GetBytes();
-            Array.Copy(pb, 0, bytes, i, pb.Length);
-            i += 12;
-            ushort ac = 32767;
-
-            ushort velx, vely, velz;
-            Vector3 vel = new Vector3(velocity.X, velocity.Y, velocity.Z);
-
-            vel = vel / 128.0f;
-            vel.X += 1;
-            vel.Y += 1;
-            vel.Z += 1;
-            //vel
-            velx = (ushort)(32768 * (vel.X));
-            vely = (ushort)(32768 * (vel.Y));
-            velz = (ushort)(32768 * (vel.Z));
-
-            bytes[i++] = (byte)(velx % 256);
-            bytes[i++] = (byte)((velx >> 8) % 256);
-            bytes[i++] = (byte)(vely % 256);
-            bytes[i++] = (byte)((vely >> 8) % 256);
-            bytes[i++] = (byte)(velz % 256);
-            bytes[i++] = (byte)((velz >> 8) % 256);
-
-            //accel
-            bytes[i++] = (byte)(ac % 256);
-            bytes[i++] = (byte)((ac >> 8) % 256);
-            bytes[i++] = (byte)(ac % 256);
-            bytes[i++] = (byte)((ac >> 8) % 256);
-            bytes[i++] = (byte)(ac % 256);
-            bytes[i++] = (byte)((ac >> 8) % 256);
-
-            ushort rw, rx, ry, rz;
-            rw = (ushort)(32768 * (rotation.W + 1));
-            rx = (ushort)(32768 * (rotation.X + 1));
-            ry = (ushort)(32768 * (rotation.Y + 1));
-            rz = (ushort)(32768 * (rotation.Z + 1));
-
-            //rot
-            bytes[i++] = (byte)(rx % 256);
-            bytes[i++] = (byte)((rx >> 8) % 256);
-            bytes[i++] = (byte)(ry % 256);
-            bytes[i++] = (byte)((ry >> 8) % 256);
-            bytes[i++] = (byte)(rz % 256);
-            bytes[i++] = (byte)((rz >> 8) % 256);
-            bytes[i++] = (byte)(rw % 256);
-            bytes[i++] = (byte)((rw >> 8) % 256);
-
-            //rotation vel
-            Vector3 rvel = new Vector3(rotationalvelocity.X, rotationalvelocity.Y, rotationalvelocity.Z);
-
-            rvel = rvel / 128.0f;
-            rvel.X += 1;
-            rvel.Y += 1;
-            rvel.Z += 1;
-            //vel
-            ushort rvelx = (ushort)(32768 * (rvel.X));
-            ushort rvely = (ushort)(32768 * (rvel.Y));
-            ushort rvelz = (ushort)(32768 * (rvel.Z));
-
-            bytes[i++] = (byte)(rvelx % 256);
-            bytes[i++] = (byte)((rvelx >> 8) % 256);
-            bytes[i++] = (byte)(rvely % 256);
-            bytes[i++] = (byte)((rvely >> 8) % 256);
-            bytes[i++] = (byte)(rvelz % 256);
-            bytes[i++] = (byte)((rvelz >> 8) % 256);
-            dat.Data = bytes;
-
-            return dat;
-        }
-
-        /// <summary>
-        /// Create the ObjectDataBlock for a ObjectUpdatePacket  (for a Primitive)
-        /// </summary>
-        /// <param name="primData"></param>
-        /// <returns></returns>
-        protected ObjectUpdatePacket.ObjectDataBlock CreatePrimUpdateBlock(PrimitiveBaseShape primShape, uint flags)
-        {
-            ObjectUpdatePacket.ObjectDataBlock objupdate = PacketPool.GetDataBlock<ObjectUpdatePacket.ObjectDataBlock>();
-            SetDefaultPrimPacketValues(objupdate);
-            objupdate.UpdateFlags = flags;
-            SetPrimPacketShapeData(objupdate, primShape);
-
-            if ((primShape.PCode == (byte)PCode.NewTree) || (primShape.PCode == (byte)PCode.Tree) || (primShape.PCode == (byte)PCode.Grass))
-            {
-                objupdate.Data = new byte[1];
-                objupdate.Data[0] = primShape.State;
-            }
-            return objupdate;
-        }
-
-        protected void SetPrimPacketShapeData(ObjectUpdatePacket.ObjectDataBlock objectData, PrimitiveBaseShape primData)
-        {
-            objectData.TextureEntry = primData.TextureEntry;
-            objectData.PCode = primData.PCode;
-            objectData.State = primData.State;
-            objectData.PathBegin = primData.PathBegin;
-            objectData.PathEnd = primData.PathEnd;
-            objectData.PathScaleX = primData.PathScaleX;
-            objectData.PathScaleY = primData.PathScaleY;
-            objectData.PathShearX = primData.PathShearX;
-            objectData.PathShearY = primData.PathShearY;
-            objectData.PathSkew = primData.PathSkew;
-            objectData.ProfileBegin = primData.ProfileBegin;
-            objectData.ProfileEnd = primData.ProfileEnd;
-            objectData.Scale = primData.Scale;
-            objectData.PathCurve = primData.PathCurve;
-            objectData.ProfileCurve = primData.ProfileCurve;
-            objectData.ProfileHollow = primData.ProfileHollow;
-            objectData.PathRadiusOffset = primData.PathRadiusOffset;
-            objectData.PathRevolutions = primData.PathRevolutions;
-            objectData.PathTaperX = primData.PathTaperX;
-            objectData.PathTaperY = primData.PathTaperY;
-            objectData.PathTwist = primData.PathTwist;
-            objectData.PathTwistBegin = primData.PathTwistBegin;
-            objectData.ExtraParams = primData.ExtraParams;
-        }
-
-        /// <summary>
-        /// Set some default values in a ObjectUpdatePacket
-        /// </summary>
-        /// <param name="objdata"></param>
-        protected void SetDefaultPrimPacketValues(ObjectUpdatePacket.ObjectDataBlock objdata)
-        {
-            objdata.PSBlock = new byte[0];
-            objdata.ExtraParams = new byte[1];
-            objdata.MediaURL = new byte[0];
-            objdata.NameValue = new byte[0];
-            objdata.Text = new byte[0];
-            objdata.TextColor = new byte[4];
-            objdata.JointAxisOrAnchor = new Vector3(0, 0, 0);
-            objdata.JointPivot = new Vector3(0, 0, 0);
-            objdata.Material = 3;
-            objdata.TextureAnim = new byte[0];
-            objdata.Sound = UUID.Zero;
-            objdata.State = 0;
-            objdata.Data = new byte[0];
-
-            objdata.ObjectData = new byte[60];
-            objdata.ObjectData[46] = 128;
-            objdata.ObjectData[47] = 63;
-        }
-
-        /// <summary>
-        ///
-        /// </summary>
-        /// <returns></returns>
-        public ObjectUpdatePacket.ObjectDataBlock CreateDefaultAvatarPacket(byte[] textureEntry)
-        {
-            ObjectUpdatePacket.ObjectDataBlock objdata = PacketPool.GetDataBlock<ObjectUpdatePacket.ObjectDataBlock>();
-            //  new OpenMetaverse.Packets.ObjectUpdatePacket.ObjectDataBlock(data1, ref i);
-
-            SetDefaultAvatarPacketValues(ref objdata);
-            objdata.UpdateFlags = 61 + (9 << 8) + (130 << 16) + (16 << 24);
-            objdata.PathCurve = 16;
-            objdata.ProfileCurve = 1;
-            objdata.PathScaleX = 100;
-            objdata.PathScaleY = 100;
-            objdata.ParentID = 0;
-            objdata.OwnerID = UUID.Zero;
-            objdata.Scale = new Vector3(1, 1, 1);
-            objdata.PCode = (byte)PCode.Avatar;
-            if (textureEntry != null)
-            {
-                objdata.TextureEntry = textureEntry;
-            }
-            Vector3 pos = new Vector3(objdata.ObjectData, 16);
-            pos.X = 100f;
-            objdata.ID = 8880000;
-            objdata.NameValue = Utils.StringToBytes("FirstName STRING RW SV Test \nLastName STRING RW SV User ");
-            //Vector3 pos2 = new Vector3(100f, 100f, 23f);
-            //objdata.FullID=user.AgentId;
-            byte[] pb = pos.GetBytes();
-            Array.Copy(pb, 0, objdata.ObjectData, 16, pb.Length);
-
-            return objdata;
-        }
-
-        /// <summary>
-        ///
-        /// </summary>
-        /// <param name="objdata"></param>
-        protected void SetDefaultAvatarPacketValues(ref ObjectUpdatePacket.ObjectDataBlock objdata)
-        {
-            objdata.PSBlock = new byte[0];
-            objdata.ExtraParams = new byte[1];
-            objdata.MediaURL = new byte[0];
-            objdata.NameValue = new byte[0];
-            objdata.Text = new byte[0];
-            objdata.TextColor = new byte[4];
-            objdata.JointAxisOrAnchor = new Vector3(0, 0, 0);
-            objdata.JointPivot = new Vector3(0, 0, 0);
-            objdata.Material = 4;
-            objdata.TextureAnim = new byte[0];
-            objdata.Sound = UUID.Zero;
-            Primitive.TextureEntry ntex = new Primitive.TextureEntry(new UUID("00000000-0000-0000-5005-000000000005"));
-            objdata.TextureEntry = ntex.GetBytes();
-
-            objdata.State = 0;
-            objdata.Data = new byte[0];
-
-            objdata.ObjectData = new byte[76];
-            objdata.ObjectData[15] = 128;
-            objdata.ObjectData[16] = 63;
-            objdata.ObjectData[56] = 128;
-            objdata.ObjectData[61] = 102;
-            objdata.ObjectData[62] = 40;
-            objdata.ObjectData[63] = 61;
-            objdata.ObjectData[64] = 189;
-        }
-
-        public void SendNameReply(UUID profileId, string firstname, string lastname)
-        {
-            UUIDNameReplyPacket packet = (UUIDNameReplyPacket)PacketPool.Instance.GetPacket(PacketType.UUIDNameReply);
-            // TODO: don't create new blocks if recycling an old packet
-            packet.UUIDNameBlock = new UUIDNameReplyPacket.UUIDNameBlockBlock[1];
-            packet.UUIDNameBlock[0] = new UUIDNameReplyPacket.UUIDNameBlockBlock();
-            packet.UUIDNameBlock[0].ID = profileId;
-            packet.UUIDNameBlock[0].FirstName = Utils.StringToBytes(firstname);
-            packet.UUIDNameBlock[0].LastName = Utils.StringToBytes(lastname);
-
-            OutPacket(packet, ThrottleOutPacketType.Task);
-        }
-
-        #endregion
-
-        /// <summary>
-        /// This is a different way of processing packets then ProcessInPacket
-        /// </summary>
-        protected virtual void RegisterLocalPacketHandlers()
-        {
-            AddLocalPacketHandler(PacketType.LogoutRequest, Logout);
-            AddLocalPacketHandler(PacketType.ViewerEffect, HandleViewerEffect);
-            AddLocalPacketHandler(PacketType.AgentCachedTexture, AgentTextureCached);
-            AddLocalPacketHandler(PacketType.MultipleObjectUpdate, MultipleObjUpdate);
-            AddLocalPacketHandler(PacketType.MoneyTransferRequest, HandleMoneyTransferRequest);
-            AddLocalPacketHandler(PacketType.ParcelBuy, HandleParcelBuyRequest);
-            AddLocalPacketHandler(PacketType.UUIDGroupNameRequest, HandleUUIDGroupNameRequest);
-            AddLocalPacketHandler(PacketType.ObjectGroup, HandleObjectGroupRequest);
-            AddLocalPacketHandler(PacketType.GenericMessage, HandleGenericMessage);
-        }
-
-        private bool HandleMoneyTransferRequest(IClientAPI sender, Packet Pack)
-        {
-            MoneyTransferRequestPacket money = (MoneyTransferRequestPacket) Pack;
-            // validate the agent owns the agentID and sessionID
-            if (money.MoneyData.SourceID == sender.AgentId && money.AgentData.AgentID == sender.AgentId &&
-                money.AgentData.SessionID == sender.SessionId)
-            {
-                handlerMoneyTransferRequest = OnMoneyTransferRequest;
-                if (handlerMoneyTransferRequest != null)
-                {
-                    handlerMoneyTransferRequest(money.MoneyData.SourceID, money.MoneyData.DestID,
-                                                money.MoneyData.Amount, money.MoneyData.TransactionType,
-                                                Util.FieldToString(money.MoneyData.Description));
-                }
-
-                return true;
-            }
-
-            return false;
-        }
-
-        private bool HandleParcelBuyRequest(IClientAPI sender, Packet Pack)
-        {
-            ParcelBuyPacket parcel = (ParcelBuyPacket) Pack;
-            if (parcel.AgentData.AgentID == AgentId && parcel.AgentData.SessionID == SessionId)
-            {
-                handlerParcelBuy = OnParcelBuy;
-                if (handlerParcelBuy != null)
-                {
-                    handlerParcelBuy(parcel.AgentData.AgentID, parcel.Data.GroupID, parcel.Data.Final,
-                                     parcel.Data.IsGroupOwned,
-                                     parcel.Data.RemoveContribution, parcel.Data.LocalID, parcel.ParcelData.Area,
-                                     parcel.ParcelData.Price,
-                                     false);
-                }
-                return true;
-            }
-            return false;
-        }
-
-        private bool HandleUUIDGroupNameRequest(IClientAPI sender, Packet Pack)
-        {
-            UUIDGroupNameRequestPacket upack = (UUIDGroupNameRequestPacket)Pack;
-            
-
-            for (int i = 0; i < upack.UUIDNameBlock.Length; i++)
-            {
-                handlerUUIDGroupNameRequest = OnUUIDGroupNameRequest;
-                if (handlerUUIDGroupNameRequest != null)
-                {
-                    handlerUUIDGroupNameRequest(upack.UUIDNameBlock[i].ID, this);
-                }
-            }
-
-            return true;
-        }
-
-        public bool HandleGenericMessage(IClientAPI sender, Packet pack)
-        {
-            GenericMessagePacket gmpack = (GenericMessagePacket) pack;
-            if (m_genericPacketHandlers.Count == 0) return false;
-            if (gmpack.AgentData.SessionID != SessionId) return false;
-
-            handlerGenericMessage = null;
-
-            string method = Util.FieldToString(gmpack.MethodData.Method).ToLower().Trim();
-
-            if (m_genericPacketHandlers.TryGetValue(method, out handlerGenericMessage))
-            {
-                List<string> msg = new List<string>();
-                List<byte[]> msgBytes = new List<byte[]>();
-
-                if (handlerGenericMessage != null)
-                {
-                    foreach (GenericMessagePacket.ParamListBlock block in gmpack.ParamList)
-                    {
-                        msg.Add(Util.FieldToString(block.Parameter));
-                        msgBytes.Add(block.Parameter);
-                    }
-                    try
-                    {
-                        if (OnBinaryGenericMessage != null)
-                        {
-                            OnBinaryGenericMessage(this, method, msgBytes.ToArray());
-                        }
-                        handlerGenericMessage(sender, method, msg);
-                        return true;
-                    }
-                    catch (Exception e)
-                    {
-                        m_log.Error("[GENERICMESSAGE] " + e);
-                    }
-                }
-            }
-            m_log.Error("[GENERICMESSAGE] Not handling GenericMessage with method-type of: " + method);
-            return false;
-        }
-
-        public bool HandleObjectGroupRequest(IClientAPI sender, Packet Pack)
-        {
-
-            ObjectGroupPacket ogpack = (ObjectGroupPacket)Pack;
-            if (ogpack.AgentData.SessionID != SessionId) return false;
-
-            handlerObjectGroupRequest = OnObjectGroupRequest;
-            if (handlerObjectGroupRequest != null)
-            {
-                for (int i = 0; i < ogpack.ObjectData.Length; i++)
-                {
-                    handlerObjectGroupRequest(this, ogpack.AgentData.GroupID, ogpack.ObjectData[i].ObjectLocalID, UUID.Zero);
-                }
-            }
-            return true;
-        }
-
-        private bool HandleViewerEffect(IClientAPI sender, Packet Pack)
-        {
-            ViewerEffectPacket viewer = (ViewerEffectPacket)Pack;
-            if (viewer.AgentData.SessionID != SessionId) return false;
-            handlerViewerEffect = OnViewerEffect;
-            if (handlerViewerEffect != null)
-            {
-                int length = viewer.Effect.Length;
-                List<ViewerEffectEventHandlerArg> args = new List<ViewerEffectEventHandlerArg>(length);
-                for (int i = 0; i < length; i++)
-                {
-                    //copy the effects block arguments into the event handler arg.
-                    ViewerEffectEventHandlerArg argument = new ViewerEffectEventHandlerArg();
-                    argument.AgentID = viewer.Effect[i].AgentID;
-                    argument.Color = viewer.Effect[i].Color;
-                    argument.Duration = viewer.Effect[i].Duration;
-                    argument.ID = viewer.Effect[i].ID;
-                    argument.Type = viewer.Effect[i].Type;
-                    argument.TypeData = viewer.Effect[i].TypeData;
-                    args.Add(argument);
-                }
-
-                handlerViewerEffect(sender, args);
-            }
-
-            return true;
-        }
-
-        public void SendScriptQuestion(UUID taskID, string taskName, string ownerName, UUID itemID, int question)
-        {
-            ScriptQuestionPacket scriptQuestion = (ScriptQuestionPacket)PacketPool.Instance.GetPacket(PacketType.ScriptQuestion);
-            scriptQuestion.Data = new ScriptQuestionPacket.DataBlock();
-            // TODO: don't create new blocks if recycling an old packet
-            scriptQuestion.Data.TaskID = taskID;
-            scriptQuestion.Data.ItemID = itemID;
-            scriptQuestion.Data.Questions = question;
-            scriptQuestion.Data.ObjectName = Utils.StringToBytes(taskName);
-            scriptQuestion.Data.ObjectOwner = Utils.StringToBytes(ownerName);
-
-            OutPacket(scriptQuestion, ThrottleOutPacketType.Task);
-        }
-
-        private void InitDefaultAnimations()
-        {
-            using (XmlTextReader reader = new XmlTextReader("data/avataranimations.xml"))
-            {
-                XmlDocument doc = new XmlDocument();
-                doc.Load(reader);
-                if (doc.DocumentElement != null)
-                    foreach (XmlNode nod in doc.DocumentElement.ChildNodes)
-                    {
-                        if (nod.Attributes["name"] != null)
-                        {
-                            string name = nod.Attributes["name"].Value.ToLower();
-                            string id = nod.InnerText;
-                            m_defaultAnimations.Add(name, (UUID)id);
-                        }
-                    }
-            }
-        }
-
-        public UUID GetDefaultAnimation(string name)
-        {
-            if (m_defaultAnimations.ContainsKey(name))
-                return m_defaultAnimations[name];
-            return UUID.Zero;
-        }
-
-        /// <summary>
-        /// Handler called when we receive a logout packet.
-        /// </summary>
-        /// <param name="client"></param>
-        /// <param name="packet"></param>
-        /// <returns></returns>
-        protected virtual bool Logout(IClientAPI client, Packet packet)
-        {
-            if (packet.Type == PacketType.LogoutRequest)
-            {
-                if (((LogoutRequestPacket)packet).AgentData.SessionID != SessionId) return false;
-            }
-            
-            return Logout(client);
-        }
-
-        /// <summary>
-        ///
-        /// </summary>
-        /// <param name="client"></param>
-        /// <returns></returns>
-        protected virtual bool Logout(IClientAPI client)
-        {
-            m_log.InfoFormat("[CLIENT]: Got a logout request for {0} in {1}", Name, Scene.RegionInfo.RegionName);
-
-            handlerLogout = OnLogout;
-
-            if (handlerLogout != null)
-            {
-                handlerLogout(client);
-            }
-
-            return true;
-        }
-
-        /// <summary>
-        /// Send a response back to a client when it asks the asset server (via the region server) if it has
-        /// its appearance texture cached.
-        ///
-        /// At the moment, we always reply that there is no cached texture.
-        /// </summary>
-        /// <param name="simclient"></param>
-        /// <param name="packet"></param>
-        /// <returns></returns>
-        protected bool AgentTextureCached(IClientAPI simclient, Packet packet)
-        {
-            //m_log.Debug("texture cached: " + packet.ToString());
-            AgentCachedTexturePacket cachedtex = (AgentCachedTexturePacket)packet;
-            AgentCachedTextureResponsePacket cachedresp = (AgentCachedTextureResponsePacket)PacketPool.Instance.GetPacket(PacketType.AgentCachedTextureResponse);
-
-            if (cachedtex.AgentData.SessionID != SessionId) return false;
-
-            // TODO: don't create new blocks if recycling an old packet
-            cachedresp.AgentData.AgentID = AgentId;
-            cachedresp.AgentData.SessionID = m_sessionId;
-            cachedresp.AgentData.SerialNum = m_cachedTextureSerial;
-            m_cachedTextureSerial++;
-            cachedresp.WearableData =
-                new AgentCachedTextureResponsePacket.WearableDataBlock[cachedtex.WearableData.Length];
-
-            for (int i = 0; i < cachedtex.WearableData.Length; i++)
-            {
-                cachedresp.WearableData[i] = new AgentCachedTextureResponsePacket.WearableDataBlock();
-                cachedresp.WearableData[i].TextureIndex = cachedtex.WearableData[i].TextureIndex;
-                cachedresp.WearableData[i].TextureID = UUID.Zero;
-                cachedresp.WearableData[i].HostName = new byte[0];
-            }
-
-            cachedresp.Header.Zerocoded = true;
-            OutPacket(cachedresp, ThrottleOutPacketType.Task);
-            
-            return true;
-        }
-
-        protected bool MultipleObjUpdate(IClientAPI simClient, Packet packet)
-        {
-            MultipleObjectUpdatePacket multipleupdate = (MultipleObjectUpdatePacket)packet;
-            if (multipleupdate.AgentData.SessionID != SessionId) return false;
-            // m_log.Debug("new multi update packet " + multipleupdate.ToString());
-            Scene tScene = (Scene)m_scene;
-
-            for (int i = 0; i < multipleupdate.ObjectData.Length; i++)
-            {
-                MultipleObjectUpdatePacket.ObjectDataBlock block = multipleupdate.ObjectData[i];
-
-                // Can't act on Null Data
-                if (block.Data != null)
-                {
-                    uint localId = block.ObjectLocalID;
-                    SceneObjectPart part = tScene.GetSceneObjectPart(localId);
-
-                    if (part == null)
-                    {
-                        // It's a ghost! tell the client to delete it from view.
-                        simClient.SendKillObject(Scene.RegionInfo.RegionHandle,
-                                                 localId);
-                    }
-                    else
-                    {
-                        // UUID partId = part.UUID;
-                        UpdatePrimGroupRotation handlerUpdatePrimGroupRotation;
-
-                        switch (block.Type)
-                        {
-                            case 1:
-                                Vector3 pos1 = new Vector3(block.Data, 0);
-
-                                handlerUpdatePrimSinglePosition = OnUpdatePrimSinglePosition;
-                                if (handlerUpdatePrimSinglePosition != null)
-                                {
-                                    // m_log.Debug("new movement position is " + pos.X + " , " + pos.Y + " , " + pos.Z);
-                                    handlerUpdatePrimSinglePosition(localId, pos1, this);
-                                }
-                                break;
-                            case 2:
-                                Quaternion rot1 = new Quaternion(block.Data, 0, true);
-
-                                handlerUpdatePrimSingleRotation = OnUpdatePrimSingleRotation;
-                                if (handlerUpdatePrimSingleRotation != null)
-                                {
-                                   // m_log.Info("new tab rotation is " + rot1.X + " , " + rot1.Y + " , " + rot1.Z + " , " + rot1.W);
-                                    handlerUpdatePrimSingleRotation(localId, rot1, this);
-                                }
-                                break;
-                            case 3:
-                                Vector3 rotPos = new Vector3(block.Data, 0);
-                                Quaternion rot2 = new Quaternion(block.Data, 12, true);
-
-                                handlerUpdatePrimSingleRotationPosition = OnUpdatePrimSingleRotationPosition;
-                                if (handlerUpdatePrimSingleRotationPosition != null)
-                                {
-                                   // m_log.Debug("new mouse rotation position is " + rotPos.X + " , " + rotPos.Y + " , " + rotPos.Z);
-                                   // m_log.Info("new mouse rotation is " + rot2.X + " , " + rot2.Y + " , " + rot2.Z + " , " + rot2.W);
-                                    handlerUpdatePrimSingleRotationPosition(localId, rot2, rotPos, this);
-                                }
-                                break;
-                            case 4:
-                            case 20:
-                                Vector3 scale4 = new Vector3(block.Data, 0);
-
-                                handlerUpdatePrimScale = OnUpdatePrimScale;
-                                if (handlerUpdatePrimScale != null)
-                                {
-//                                     m_log.Debug("new scale is " + scale4.X + " , " + scale4.Y + " , " + scale4.Z);
-                                    handlerUpdatePrimScale(localId, scale4, this);
-                                }
-                                break;
-                            case 5:
-
-                                Vector3 scale1 = new Vector3(block.Data, 12);
-                                Vector3 pos11 = new Vector3(block.Data, 0);
-
-                                handlerUpdatePrimScale = OnUpdatePrimScale;
-                                if (handlerUpdatePrimScale != null)
-                                {
-                                    // m_log.Debug("new scale is " + scale.X + " , " + scale.Y + " , " + scale.Z);
-                                    handlerUpdatePrimScale(localId, scale1, this);
-
-                                    handlerUpdatePrimSinglePosition = OnUpdatePrimSinglePosition;
-                                    if (handlerUpdatePrimSinglePosition != null)
-                                    {
-                                        handlerUpdatePrimSinglePosition(localId, pos11, this);
-                                    }
-                                }
-                                break;
-                            case 9:
-                                Vector3 pos2 = new Vector3(block.Data, 0);
-
-                                handlerUpdateVector = OnUpdatePrimGroupPosition;
-
-                                if (handlerUpdateVector != null)
-                                {
-
-                                    handlerUpdateVector(localId, pos2, this);
-                                }
-                                break;
-                            case 10:
-                                Quaternion rot3 = new Quaternion(block.Data, 0, true);
-
-                                handlerUpdatePrimRotation = OnUpdatePrimGroupRotation;
-                                if (handlerUpdatePrimRotation != null)
-                                {
-                                  //  Console.WriteLine("new rotation is " + rot3.X + " , " + rot3.Y + " , " + rot3.Z + " , " + rot3.W);
-                                    handlerUpdatePrimRotation(localId, rot3, this);
-                                }
-                                break;
-                            case 11:
-                                Vector3 pos3 = new Vector3(block.Data, 0);
-                                Quaternion rot4 = new Quaternion(block.Data, 12, true);
-
-                                handlerUpdatePrimGroupRotation = OnUpdatePrimGroupMouseRotation;
-                                if (handlerUpdatePrimGroupRotation != null)
-                                {
-                                  //  m_log.Debug("new rotation position is " + pos.X + " , " + pos.Y + " , " + pos.Z);
-                                   // m_log.Debug("new group mouse rotation is " + rot4.X + " , " + rot4.Y + " , " + rot4.Z + " , " + rot4.W);
-                                    handlerUpdatePrimGroupRotation(localId, pos3, rot4, this);
-                                }
-                                break;
-                            case 12:
-                            case 28:
-                                Vector3 scale7 = new Vector3(block.Data, 0);
-
-                                handlerUpdatePrimGroupScale = OnUpdatePrimGroupScale;
-                                if (handlerUpdatePrimGroupScale != null)
-                                {
-//                                     m_log.Debug("new scale is " + scale7.X + " , " + scale7.Y + " , " + scale7.Z);
-                                    handlerUpdatePrimGroupScale(localId, scale7, this);
-                                }
-                                break;
-                            case 13:
-                                Vector3 scale2 = new Vector3(block.Data, 12);
-                                Vector3 pos4 = new Vector3(block.Data, 0);
-
-                                handlerUpdatePrimScale = OnUpdatePrimScale;
-                                if (handlerUpdatePrimScale != null)
-                                {
-                                    //m_log.Debug("new scale is " + scale.X + " , " + scale.Y + " , " + scale.Z);
-                                    handlerUpdatePrimScale(localId, scale2, this);
-
-                                    // Change the position based on scale (for bug number 246)
-                                    handlerUpdatePrimSinglePosition = OnUpdatePrimSinglePosition;
-                                    // m_log.Debug("new movement position is " + pos.X + " , " + pos.Y + " , " + pos.Z);
-                                    if (handlerUpdatePrimSinglePosition != null)
-                                    {
-                                        handlerUpdatePrimSinglePosition(localId, pos4, this);
-                                    }
-                                }
-                                break;
-                            case 29:
-                                Vector3 scale5 = new Vector3(block.Data, 12);
-                                Vector3 pos5 = new Vector3(block.Data, 0);
-
-                                handlerUpdatePrimGroupScale = OnUpdatePrimGroupScale;
-                                if (handlerUpdatePrimGroupScale != null)
-                                {
-                                    // m_log.Debug("new scale is " + scale.X + " , " + scale.Y + " , " + scale.Z);
-                                    handlerUpdatePrimGroupScale(localId, scale5, this);
-                                    handlerUpdateVector = OnUpdatePrimGroupPosition;
-
-                                    if (handlerUpdateVector != null)
-                                    {
-                                        handlerUpdateVector(localId, pos5, this);
-                                    }
-                                }
-                                break;
-                            case 21:
-                                Vector3 scale6 = new Vector3(block.Data, 12);
-                                Vector3 pos6 = new Vector3(block.Data, 0);
-
-                                handlerUpdatePrimScale = OnUpdatePrimScale;
-                                if (handlerUpdatePrimScale != null)
-                                {
-                                    // m_log.Debug("new scale is " + scale.X + " , " + scale.Y + " , " + scale.Z);
-                                    handlerUpdatePrimScale(localId, scale6, this);
-                                    handlerUpdatePrimSinglePosition = OnUpdatePrimSinglePosition;
-                                    if (handlerUpdatePrimSinglePosition != null)
-                                    {
-                                        handlerUpdatePrimSinglePosition(localId, pos6, this);
-                                    }
-                                }
-                                break;
-                            default:
-                                m_log.Debug("[CLIENT] MultipleObjUpdate recieved an unknown packet type: " + (block.Type));
-                                break;
-                        }
-                    }
-                }
-            }
-            return true;
-        }
-
-        public void RequestMapLayer()
-        {
-            //should be getting the map layer from the grid server
-            //send a layer covering the 800,800 - 1200,1200 area (should be covering the requested area)
-            MapLayerReplyPacket mapReply = (MapLayerReplyPacket)PacketPool.Instance.GetPacket(PacketType.MapLayerReply);
-            // TODO: don't create new blocks if recycling an old packet
-            mapReply.AgentData.AgentID = AgentId;
-            mapReply.AgentData.Flags = 0;
-            mapReply.LayerData = new MapLayerReplyPacket.LayerDataBlock[1];
-            mapReply.LayerData[0] = new MapLayerReplyPacket.LayerDataBlock();
-            mapReply.LayerData[0].Bottom = 0;
-            mapReply.LayerData[0].Left = 0;
-            mapReply.LayerData[0].Top = 30000;
-            mapReply.LayerData[0].Right = 30000;
-            mapReply.LayerData[0].ImageID = new UUID("00000000-0000-1111-9999-000000000006");
-            mapReply.Header.Zerocoded = true;
-            OutPacket(mapReply, ThrottleOutPacketType.Land);
-        }
-
-        public void RequestMapBlocksX(int minX, int minY, int maxX, int maxY)
-        {
-            /*
-            IList simMapProfiles = m_gridServer.RequestMapBlocks(minX, minY, maxX, maxY);
-            MapBlockReplyPacket mbReply = new MapBlockReplyPacket();
-            mbReply.AgentData.AgentId = AgentId;
-            int len;
-            if (simMapProfiles == null)
-                len = 0;
-            else
-                len = simMapProfiles.Count;
-
-            mbReply.Data = new MapBlockReplyPacket.DataBlock[len];
-            int iii;
-            for (iii = 0; iii < len; iii++)
-            {
-                Hashtable mp = (Hashtable)simMapProfiles[iii];
-                mbReply.Data[iii] = new MapBlockReplyPacket.DataBlock();
-                mbReply.Data[iii].Name = Util.UTF8.GetBytes((string)mp["name"]);
-                mbReply.Data[iii].Access = System.Convert.ToByte(mp["access"]);
-                mbReply.Data[iii].Agents = System.Convert.ToByte(mp["agents"]);
-                mbReply.Data[iii].MapImageID = new UUID((string)mp["map-image-id"]);
-                mbReply.Data[iii].RegionFlags = System.Convert.ToUInt32(mp["region-flags"]);
-                mbReply.Data[iii].WaterHeight = System.Convert.ToByte(mp["water-height"]);
-                mbReply.Data[iii].X = System.Convert.ToUInt16(mp["x"]);
-                mbReply.Data[iii].Y = System.Convert.ToUInt16(mp["y"]);
-            }
-            this.OutPacket(mbReply, ThrottleOutPacketType.Land);
-             */
-        }
-
-        /// <summary>
-        /// returns a byte array of the client set throttles Gets multiplied by the multiplier
-        ///
-        /// </summary>
-        /// <param name="multiplier">non 1 multiplier for subdividing the throttles between individual regions</param>
-        /// <returns></returns>
-        public byte[] GetThrottlesPacked(float multiplier)
-        {
-            return m_PacketHandler.PacketQueue.GetThrottlesPacked(multiplier);
-        }
-        /// <summary>
-        /// sets the throttles from values supplied by the client
-        /// </summary>
-        /// <param name="throttles"></param>
-        public void SetChildAgentThrottle(byte[] throttles)
-        {
-            m_PacketHandler.PacketQueue.SetThrottleFromClient(throttles);
-        }
-
-        /// <summary>
-        /// Method gets called when a new packet has arrived from the UDP
-        /// server. This happens after it's been decoded into a libsl object.
-        /// </summary>
-        /// <param name="NewPack">object containing the packet.</param>
-        public virtual void InPacket(object NewPack)
-        {
-            // Cast NewPack to Packet.
-            m_PacketHandler.InPacket((Packet) NewPack);
-        }
-
-        /// <summary>
-        /// This is the starting point for sending a simulator packet out to the client.
-        ///
-        /// Please do not call this from outside the LindenUDP client stack.
-        /// </summary>
-        /// <param name="NewPack"></param>
-        /// <param name="throttlePacketType">Corresponds to the type of data that is going out.  Enum</param>
-        public void OutPacket(Packet NewPack, ThrottleOutPacketType throttlePacketType)
-        {
-            m_PacketHandler.OutPacket(NewPack, throttlePacketType);
-        }
-
-        public bool AddMoney(int debit)
-        {
-            if (m_moneyBalance + debit >= 0)
-            {
-                m_moneyBalance += debit;
-                SendMoneyBalance(UUID.Zero, true, Utils.StringToBytes("Poof Poof!"), m_moneyBalance);
-                return true;
-            }
-            return false;
-        }
-
-        /// <summary>
-        /// Breaks down the genericMessagePacket into specific events
-        /// </summary>
-        /// <param name="gmMethod"></param>
-        /// <param name="gmInvoice"></param>
-        /// <param name="gmParams"></param>
-        public void DecipherGenericMessage(string gmMethod, UUID gmInvoice, GenericMessagePacket.ParamListBlock[] gmParams)
-        {
-            switch (gmMethod)
-            {
-                case "autopilot":
-                    float locx;
-                    float locy;
-                    float locz;
-
-                    try
-                    {
-                        uint regionX;
-                        uint regionY;
-                        Utils.LongToUInts(Scene.RegionInfo.RegionHandle, out regionX, out regionY);
-                        locx = Convert.ToSingle(Utils.BytesToString(gmParams[0].Parameter)) - regionX;
-                        locy = Convert.ToSingle(Utils.BytesToString(gmParams[1].Parameter)) - regionY;
-                        locz = Convert.ToSingle(Utils.BytesToString(gmParams[2].Parameter));
-                    }
-                    catch (InvalidCastException)
-                    {
-                        m_log.Error("[CLIENT]: Invalid autopilot request");
-                        return;
-                    }
-
-                    handlerAutoPilotGo = OnAutoPilotGo;
-                    if (handlerAutoPilotGo != null)
-                    {
-                        handlerAutoPilotGo(0, new Vector3(locx, locy, locz), this);
-                    }
-                    m_log.InfoFormat("[CLIENT]: Client Requests autopilot to position <{0},{1},{2}>", locx, locy, locz);
-
-
-                    break;
-                default:
-                    m_log.Debug("[CLIENT]: Unknown Generic Message, Method: " + gmMethod + ". Invoice: " + gmInvoice + ".  Dumping Params:");
-                    for (int hi = 0; hi < gmParams.Length; hi++)
-                    {
-                        Console.WriteLine(gmParams[hi].ToString());
-                    }
-                    //gmpack.MethodData.
-                    break;
-
-            }
-        }
-
-        /// <summary>
-        /// Entryway from the client to the simulator.  All UDP packets from the client will end up here
-        /// </summary>
-        /// <param name="Pack">OpenMetaverse.packet</param>
-        public void ProcessInPacket(Packet Pack)
-        {
-
-            if (ProcessPacketMethod(Pack))
-            {
-                return;
-            }
-
-            const bool m_checkPackets = true;
-
-            // Main packet processing conditional
-            switch (Pack.Type)
-            {
-                    #region Scene/Avatar
-
-                case PacketType.AvatarPropertiesRequest:
-                    AvatarPropertiesRequestPacket avatarProperties = (AvatarPropertiesRequestPacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (avatarProperties.AgentData.SessionID != SessionId ||
-                            avatarProperties.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    handlerRequestAvatarProperties = OnRequestAvatarProperties;
-                    if (handlerRequestAvatarProperties != null)
-                    {
-                        handlerRequestAvatarProperties(this, avatarProperties.AgentData.AvatarID);
-                    }
-
-                    break;
-
-                case PacketType.ChatFromViewer:
-                    ChatFromViewerPacket inchatpack = (ChatFromViewerPacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (inchatpack.AgentData.SessionID != SessionId ||
-                            inchatpack.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    string fromName = String.Empty; //ClientAvatar.firstname + " " + ClientAvatar.lastname;
-                    byte[] message = inchatpack.ChatData.Message;
-                    byte type = inchatpack.ChatData.Type;
-                    Vector3 fromPos = new Vector3(); // ClientAvatar.Pos;
-                    // UUID fromAgentID = AgentId;
-
-                    int channel = inchatpack.ChatData.Channel;
-
-                    if (OnChatFromClient != null)
-                    {
-                        OSChatMessage args = new OSChatMessage();
-                        args.Channel = channel;
-                        args.From = fromName;
-                        args.Message = Utils.BytesToString(message);
-                        args.Type = (ChatTypeEnum)type;
-                        args.Position = fromPos;
-
-                        args.Scene = Scene;
-                        args.Sender = this;
-                        args.SenderUUID = this.AgentId;
-
-                        handlerChatFromClient = OnChatFromClient;
-                        if (handlerChatFromClient != null)
-                            handlerChatFromClient(this, args);
-                    }
-                    break;
-
-                case PacketType.AvatarPropertiesUpdate:
-                    AvatarPropertiesUpdatePacket avatarProps = (AvatarPropertiesUpdatePacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (avatarProps.AgentData.SessionID != SessionId ||
-                            avatarProps.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    handlerUpdateAvatarProperties = OnUpdateAvatarProperties;
-                    if (handlerUpdateAvatarProperties != null)
-                    {
-                        AvatarPropertiesUpdatePacket.PropertiesDataBlock Properties = avatarProps.PropertiesData;
-                        UserProfileData UserProfile = new UserProfileData();
-                        UserProfile.ID = AgentId;
-                        UserProfile.AboutText = Utils.BytesToString(Properties.AboutText);
-                        UserProfile.FirstLifeAboutText = Utils.BytesToString(Properties.FLAboutText);
-                        UserProfile.FirstLifeImage = Properties.FLImageID;
-                        UserProfile.Image = Properties.ImageID;
-                        UserProfile.ProfileUrl = Utils.BytesToString(Properties.ProfileURL);
-
-                        handlerUpdateAvatarProperties(this, UserProfile);
-                    }
-                    break;
-
-                case PacketType.ScriptDialogReply:
-                    ScriptDialogReplyPacket rdialog = (ScriptDialogReplyPacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (rdialog.AgentData.SessionID != SessionId ||
-                            rdialog.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    int ch = rdialog.Data.ChatChannel;
-                    byte[] msg = rdialog.Data.ButtonLabel;
-                    if (OnChatFromClient != null)
-                    {
-                        OSChatMessage args = new OSChatMessage();
-                        args.Channel = ch;
-                        args.From = String.Empty;
-                        args.Message = Utils.BytesToString(msg);
-                        args.Type = ChatTypeEnum.Shout;
-                        args.Position = new Vector3();
-                        args.Scene = Scene;
-                        args.Sender = this;
-                        handlerChatFromClient2 = OnChatFromClient;
-                        if (handlerChatFromClient2 != null)
-                            handlerChatFromClient2(this, args);
-                    }
-
-                    break;
-
-                case PacketType.ImprovedInstantMessage:
-                    ImprovedInstantMessagePacket msgpack = (ImprovedInstantMessagePacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (msgpack.AgentData.SessionID != SessionId ||
-                            msgpack.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    string IMfromName = Util.FieldToString(msgpack.MessageBlock.FromAgentName);
-                    string IMmessage = Utils.BytesToString(msgpack.MessageBlock.Message);
-                    handlerInstantMessage = OnInstantMessage;
-
-                    if (handlerInstantMessage != null)
-                    {
-                        GridInstantMessage im = new GridInstantMessage(Scene,
-                                msgpack.AgentData.AgentID,
-                                IMfromName,
-                                msgpack.MessageBlock.ToAgentID,
-                                msgpack.MessageBlock.Dialog,
-                                msgpack.MessageBlock.FromGroup,
-                                IMmessage,
-                                msgpack.MessageBlock.ID,
-                                msgpack.MessageBlock.Offline != 0 ? true : false,
-                                msgpack.MessageBlock.Position,
-                                msgpack.MessageBlock.BinaryBucket);
-
-                        handlerInstantMessage(this, im);
-                    }
-                    break;
-
-                case PacketType.AcceptFriendship:
-                    AcceptFriendshipPacket afriendpack = (AcceptFriendshipPacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (afriendpack.AgentData.SessionID != SessionId ||
-                            afriendpack.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    // My guess is this is the folder to stick the calling card into
-                    List<UUID> callingCardFolders = new List<UUID>();
-
-                    UUID agentID = afriendpack.AgentData.AgentID;
-                    UUID transactionID = afriendpack.TransactionBlock.TransactionID;
-
-                    for (int fi = 0; fi < afriendpack.FolderData.Length; fi++)
-                    {
-                        callingCardFolders.Add(afriendpack.FolderData[fi].FolderID);
-                    }
-
-                    handlerApproveFriendRequest = OnApproveFriendRequest;
-                    if (handlerApproveFriendRequest != null)
-                    {
-                        handlerApproveFriendRequest(this, agentID, transactionID, callingCardFolders);
-                    }
-                    break;
-
-                case PacketType.DeclineFriendship:
-                    DeclineFriendshipPacket dfriendpack = (DeclineFriendshipPacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (dfriendpack.AgentData.SessionID != SessionId ||
-                            dfriendpack.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    if (OnDenyFriendRequest != null)
-                    {
-                        OnDenyFriendRequest(this,
-                                            dfriendpack.AgentData.AgentID,
-                                            dfriendpack.TransactionBlock.TransactionID,
-                                            null);
-                    }
-                    break;
-
-                case PacketType.TerminateFriendship:
-                    TerminateFriendshipPacket tfriendpack = (TerminateFriendshipPacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (tfriendpack.AgentData.SessionID != SessionId ||
-                            tfriendpack.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    UUID listOwnerAgentID = tfriendpack.AgentData.AgentID;
-                    UUID exFriendID = tfriendpack.ExBlock.OtherID;
-
-                    handlerTerminateFriendship = OnTerminateFriendship;
-                    if (handlerTerminateFriendship != null)
-                    {
-                        handlerTerminateFriendship(this, listOwnerAgentID, exFriendID);
-                    }
-                    break;
-
-                case PacketType.RezObject:
-                    RezObjectPacket rezPacket = (RezObjectPacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (rezPacket.AgentData.SessionID != SessionId ||
-                            rezPacket.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    handlerRezObject = OnRezObject;
-                    if (handlerRezObject != null)
-                    {
-                        handlerRezObject(this, rezPacket.InventoryData.ItemID, rezPacket.RezData.RayEnd,
-                                         rezPacket.RezData.RayStart, rezPacket.RezData.RayTargetID,
-                                         rezPacket.RezData.BypassRaycast, rezPacket.RezData.RayEndIsIntersection,
-                                         rezPacket.RezData.RezSelected, rezPacket.RezData.RemoveItem,
-                                         rezPacket.RezData.FromTaskID);
-                    }
-                    break;
-
-                case PacketType.DeRezObject:
-                    DeRezObjectPacket DeRezPacket = (DeRezObjectPacket) Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (DeRezPacket.AgentData.SessionID != SessionId ||
-                            DeRezPacket.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    handlerDeRezObject = OnDeRezObject;
-                    if (handlerDeRezObject != null)
-                    {
-                        List<uint> deRezIDs = new List<uint>();
-
-                        foreach (DeRezObjectPacket.ObjectDataBlock data in
-                            DeRezPacket.ObjectData)
-                        {
-                            deRezIDs.Add(data.ObjectLocalID);
-                        }
-                            // It just so happens that the values on the DeRezAction enumerator match the Destination
-                            // values given by a Second Life client
-                            handlerDeRezObject(this, deRezIDs,
-                                               DeRezPacket.AgentBlock.GroupID,
-                                               (DeRezAction)DeRezPacket.AgentBlock.Destination,
-                                               DeRezPacket.AgentBlock.DestinationID);
-                        
-                    }
-                    break;
-
-                case PacketType.ModifyLand:
-                    ModifyLandPacket modify = (ModifyLandPacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (modify.AgentData.SessionID != SessionId ||
-                            modify.AgentData.AgentID != AgentId)
-                            break;
-                    }
-
-                    #endregion
-                    //m_log.Info("[LAND]: LAND:" + modify.ToString());
-                    if (modify.ParcelData.Length > 0)
-                    {
-                        if (OnModifyTerrain != null)
-                        {
-                            for (int i = 0; i < modify.ParcelData.Length; i++)
-                            {
-                                handlerModifyTerrain = OnModifyTerrain;
-                                if (handlerModifyTerrain != null)
-                                {
-                                    handlerModifyTerrain(AgentId, modify.ModifyBlock.Height, modify.ModifyBlock.Seconds,
-                                                         modify.ModifyBlock.BrushSize,
-                                                         modify.ModifyBlock.Action, modify.ParcelData[i].North,
-                                                         modify.ParcelData[i].West, modify.ParcelData[i].South,
-                                                         modify.ParcelData[i].East, AgentId);
-                                }
-                            }
-                        }
-                    }
-
-                    break;
-
-                case PacketType.RegionHandshakeReply:
-
-                    handlerRegionHandShakeReply = OnRegionHandShakeReply;
-                    if (handlerRegionHandShakeReply != null)
-                    {
-                        handlerRegionHandShakeReply(this);
-                    }
-
-                    break;
-
-                case PacketType.AgentWearablesRequest:
-                    handlerRequestWearables = OnRequestWearables;
-
-                    if (handlerRequestWearables != null)
-                    {
-                        handlerRequestWearables();
-                    }
-
-                    handlerRequestAvatarsData = OnRequestAvatarsData;
-
-                    if (handlerRequestAvatarsData != null)
-                    {
-                        handlerRequestAvatarsData(this);
-                    }
-
-                    break;
-
-                case PacketType.AgentSetAppearance:
-                    AgentSetAppearancePacket appear = (AgentSetAppearancePacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (appear.AgentData.SessionID != SessionId ||
-                            appear.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    handlerSetAppearance = OnSetAppearance;
-                    if (handlerSetAppearance != null)
-                    {
-                        // Temporarily protect ourselves from the mantis #951 failure.
-                        // However, we could do this for several other handlers where a failure isn't terminal
-                        // for the client session anyway, in order to protect ourselves against bad code in plugins
-                        try
-                        {
-                            byte[] visualparams = new byte[appear.VisualParam.Length];
-                            for (int i = 0; i < appear.VisualParam.Length; i++)
-                                visualparams[i] = appear.VisualParam[i].ParamValue;
-
-                            Primitive.TextureEntry te = null;
-                            if (appear.ObjectData.TextureEntry.Length > 1)
-                                te = new Primitive.TextureEntry(appear.ObjectData.TextureEntry, 0, appear.ObjectData.TextureEntry.Length);
-
-                            handlerSetAppearance(te, visualparams);
-                        }
-                        catch (Exception e)
-                        {
-                            m_log.ErrorFormat(
-                                "[CLIENT VIEW]: AgentSetApperance packet handler threw an exception, {0}",
-                                e);
-                        }
-                    }
-
-                    break;
-                
-                case PacketType.AgentIsNowWearing:
-                    if (OnAvatarNowWearing != null)
-                    {
-                        AgentIsNowWearingPacket nowWearing = (AgentIsNowWearingPacket)Pack;
-
-                        #region Packet Session and User Check
-                        if (m_checkPackets)
-                        {
-                            if (nowWearing.AgentData.SessionID != SessionId ||
-                                nowWearing.AgentData.AgentID != AgentId)
-                                break;
-                        }
-                        #endregion
-
-                        AvatarWearingArgs wearingArgs = new AvatarWearingArgs();
-                        for (int i = 0; i < nowWearing.WearableData.Length; i++)
-                        {
-                            AvatarWearingArgs.Wearable wearable =
-                                new AvatarWearingArgs.Wearable(nowWearing.WearableData[i].ItemID,
-                                                               nowWearing.WearableData[i].WearableType);
-                            wearingArgs.NowWearing.Add(wearable);
-                        }
-
-                        handlerAvatarNowWearing = OnAvatarNowWearing;
-                        if (handlerAvatarNowWearing != null)
-                        {
-                            handlerAvatarNowWearing(this, wearingArgs);
-                        }
-                    }
-                    break;
-
-                case PacketType.RezSingleAttachmentFromInv:
-                    handlerRezSingleAttachment = OnRezSingleAttachmentFromInv;
-                    if (handlerRezSingleAttachment != null)
-                    {
-                        RezSingleAttachmentFromInvPacket rez = (RezSingleAttachmentFromInvPacket)Pack;
-
-                        #region Packet Session and User Check
-                        if (m_checkPackets)
-                        {
-                            if (rez.AgentData.SessionID != SessionId ||
-                                rez.AgentData.AgentID != AgentId)
-                                break;
-                        }
-                        #endregion
-
-                        handlerRezSingleAttachment(this, rez.ObjectData.ItemID,
-                                                   rez.ObjectData.AttachmentPt);
-                    }
-
-                    break;
-
-                case PacketType.RezMultipleAttachmentsFromInv:
-                    handlerRezMultipleAttachments = OnRezMultipleAttachmentsFromInv;
-                    if (handlerRezMultipleAttachments != null)
-                    {
-                        RezMultipleAttachmentsFromInvPacket rez = (RezMultipleAttachmentsFromInvPacket)Pack;
-                        handlerRezMultipleAttachments(this, rez.HeaderData,
-                                                      rez.ObjectData);
-                    }
-
-                    break;
-
-                case PacketType.DetachAttachmentIntoInv:
-                    handlerDetachAttachmentIntoInv = OnDetachAttachmentIntoInv;
-                    if (handlerDetachAttachmentIntoInv != null)
-                    {
-                        DetachAttachmentIntoInvPacket detachtoInv = (DetachAttachmentIntoInvPacket)Pack;
-
-                        #region Packet Session and User Check
-                        // UNSUPPORTED ON THIS PACKET
-                        #endregion
-
-                        UUID itemID = detachtoInv.ObjectData.ItemID;
-                        // UUID ATTACH_agentID = detachtoInv.ObjectData.AgentID;
-
-                        handlerDetachAttachmentIntoInv(itemID, this);
-                    }
-                    break;
-
-                case PacketType.ObjectAttach:
-                    if (OnObjectAttach != null)
-                    {
-                        ObjectAttachPacket att = (ObjectAttachPacket)Pack;
-
-                        #region Packet Session and User Check
-                        if (m_checkPackets)
-                        {
-                            if (att.AgentData.SessionID != SessionId ||
-                                att.AgentData.AgentID != AgentId)
-                                break;
-                        }
-                        #endregion
-
-                        handlerObjectAttach = OnObjectAttach;
-
-                        if (handlerObjectAttach != null)
-                        {
-                            if (att.ObjectData.Length > 0)
-                            {
-                                handlerObjectAttach(this, att.ObjectData[0].ObjectLocalID, att.AgentData.AttachmentPoint, att.ObjectData[0].Rotation, false);
-                            }
-                        }
-                    }
-                    break;
-
-                case PacketType.ObjectDetach:
-                    ObjectDetachPacket dett = (ObjectDetachPacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (dett.AgentData.SessionID != SessionId ||
-                            dett.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    for (int j = 0; j < dett.ObjectData.Length; j++)
-                    {
-                        uint obj = dett.ObjectData[j].ObjectLocalID;
-                        handlerObjectDetach = OnObjectDetach;
-                        if (handlerObjectDetach != null)
-                        {
-                            handlerObjectDetach(obj, this);
-                        }
-
-                    }
-                    break;
-
-                case PacketType.ObjectDrop:
-                    ObjectDropPacket dropp = (ObjectDropPacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (dropp.AgentData.SessionID != SessionId ||
-                            dropp.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    for (int j = 0; j < dropp.ObjectData.Length; j++)
-                    {
-                        uint obj = dropp.ObjectData[j].ObjectLocalID;
-                        handlerObjectDrop = OnObjectDrop;
-                        if (handlerObjectDrop != null)
-                        {
-                            handlerObjectDrop(obj, this);
-                        }
-                    }
-                    break;
-
-                case PacketType.SetAlwaysRun:
-                    SetAlwaysRunPacket run = (SetAlwaysRunPacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (run.AgentData.SessionID != SessionId ||
-                            run.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    handlerSetAlwaysRun = OnSetAlwaysRun;
-                    if (handlerSetAlwaysRun != null)
-                        handlerSetAlwaysRun(this, run.AgentData.AlwaysRun);
-
-                    break;
-
-                case PacketType.CompleteAgentMovement:
-                    handlerCompleteMovementToRegion = OnCompleteMovementToRegion;
-                    if (handlerCompleteMovementToRegion != null)
-                    {
-                        handlerCompleteMovementToRegion();
-                    }
-                    handlerCompleteMovementToRegion = null;
-
-                    break;
-
-                case PacketType.AgentUpdate:
-                    if (OnAgentUpdate != null)
-                    {
-                        bool update = false;
-                        AgentUpdatePacket agenUpdate = (AgentUpdatePacket)Pack;
-
-                        #region Packet Session and User Check
-                        if (m_checkPackets)
-                        {
-                            if (agenUpdate.AgentData.SessionID != SessionId ||
-                                agenUpdate.AgentData.AgentID != AgentId)
-                                break;
-                        }
-                        #endregion
-
-                        AgentUpdatePacket.AgentDataBlock x = agenUpdate.AgentData;
-
-                        // We can only check when we have something to check
-                        // against.
-
-                        if (lastarg != null)
-                        {
-                            update = 
-                               (
-                                (x.BodyRotation != lastarg.BodyRotation) ||
-                                (x.CameraAtAxis != lastarg.CameraAtAxis) ||
-                                (x.CameraCenter != lastarg.CameraCenter) ||
-                                (x.CameraLeftAxis != lastarg.CameraLeftAxis) ||
-                                (x.CameraUpAxis != lastarg.CameraUpAxis) ||
-                                (x.ControlFlags != lastarg.ControlFlags) ||
-                                (x.Far != lastarg.Far) ||
-                                (x.Flags != lastarg.Flags) ||
-                                (x.State != lastarg.State) ||
-                                (x.HeadRotation != lastarg.HeadRotation) ||
-                                (x.SessionID != lastarg.SessionID) ||
-                                (x.AgentID != lastarg.AgentID)
-                               );
-                        }
-                        else
-                            update = true;
-
-                        // These should be ordered from most-likely to
-                        // least likely to change. I've made an initial
-                        // guess at that.
-
-                        if (update)
-                        {
-                            AgentUpdateArgs arg = new AgentUpdateArgs();
-                            arg.AgentID = x.AgentID;
-                            arg.BodyRotation = x.BodyRotation;
-                            arg.CameraAtAxis = x.CameraAtAxis;
-                            arg.CameraCenter = x.CameraCenter;
-                            arg.CameraLeftAxis = x.CameraLeftAxis;
-                            arg.CameraUpAxis = x.CameraUpAxis;
-                            arg.ControlFlags = x.ControlFlags;
-                            arg.Far = x.Far;
-                            arg.Flags = x.Flags;
-                            arg.HeadRotation = x.HeadRotation;
-                            arg.SessionID = x.SessionID;
-                            arg.State = x.State;
-                            handlerAgentUpdate = OnAgentUpdate;
-                            lastarg = arg; // save this set of arguments for nexttime
-                            if (handlerAgentUpdate != null)
-                                OnAgentUpdate(this, arg);
-
-                            handlerAgentUpdate = null;
-                        }
-
-                    }
-                    break;
-
-                case PacketType.AgentAnimation:
-                    AgentAnimationPacket AgentAni = (AgentAnimationPacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (AgentAni.AgentData.SessionID != SessionId ||
-                            AgentAni.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    handlerStartAnim = null;
-                    handlerStopAnim = null;
-
-                    for (int i = 0; i < AgentAni.AnimationList.Length; i++)
-                    {
-                        if (AgentAni.AnimationList[i].StartAnim)
-                        {
-                            handlerStartAnim = OnStartAnim;
-                            if (handlerStartAnim != null)
-                            {
-                                handlerStartAnim(this, AgentAni.AnimationList[i].AnimID);
-                            }
-                        }
-                        else
-                        {
-                            handlerStopAnim = OnStopAnim;
-                            if (handlerStopAnim != null)
-                            {
-                                handlerStopAnim(this, AgentAni.AnimationList[i].AnimID);
-                            }
-                        }
-                    }
-                    break;
-
-                case PacketType.AgentRequestSit:
-                    if (OnAgentRequestSit != null)
-                    {
-                        AgentRequestSitPacket agentRequestSit = (AgentRequestSitPacket)Pack;
-
-                        #region Packet Session and User Check
-                        if (m_checkPackets)
-                        {
-                            if (agentRequestSit.AgentData.SessionID != SessionId ||
-                                agentRequestSit.AgentData.AgentID != AgentId)
-                                break;
-                        }
-                        #endregion
-
-                        handlerAgentRequestSit = OnAgentRequestSit;
-                        if (handlerAgentRequestSit != null)
-                            handlerAgentRequestSit(this, agentRequestSit.AgentData.AgentID,
-                                                   agentRequestSit.TargetObject.TargetID, agentRequestSit.TargetObject.Offset);
-                    }
-                    break;
-
-                case PacketType.AgentSit:
-                    if (OnAgentSit != null)
-                    {
-                        AgentSitPacket agentSit = (AgentSitPacket)Pack;
-
-                        #region Packet Session and User Check
-                        if (m_checkPackets)
-                        {
-                            if (agentSit.AgentData.SessionID != SessionId ||
-                                agentSit.AgentData.AgentID != AgentId)
-                                break;
-                        }
-                        #endregion
-
-                        handlerAgentSit = OnAgentSit;
-                        if (handlerAgentSit != null)
-                        {
-                            OnAgentSit(this, agentSit.AgentData.AgentID);
-                        }
-                    }
-                    break;
-
-                case PacketType.SoundTrigger:
-                    SoundTriggerPacket soundTriggerPacket = (SoundTriggerPacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        // UNSUPPORTED ON THIS PACKET
-                    }
-                    #endregion
-
-                    handlerSoundTrigger = OnSoundTrigger;
-                    if (handlerSoundTrigger != null)
-                    {
-                        handlerSoundTrigger(soundTriggerPacket.SoundData.SoundID, soundTriggerPacket.SoundData.OwnerID,
-                            soundTriggerPacket.SoundData.ObjectID, soundTriggerPacket.SoundData.ParentID,
-                            soundTriggerPacket.SoundData.Gain, soundTriggerPacket.SoundData.Position,
-                            soundTriggerPacket.SoundData.Handle);
-
-                    }
-                    break;
-
-                case PacketType.AvatarPickerRequest:
-                    AvatarPickerRequestPacket avRequestQuery = (AvatarPickerRequestPacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (avRequestQuery.AgentData.SessionID != SessionId ||
-                            avRequestQuery.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    AvatarPickerRequestPacket.AgentDataBlock Requestdata = avRequestQuery.AgentData;
-                    AvatarPickerRequestPacket.DataBlock querydata = avRequestQuery.Data;
-                    //m_log.Debug("Agent Sends:" + Utils.BytesToString(querydata.Name));
-
-                    handlerAvatarPickerRequest = OnAvatarPickerRequest;
-                    if (handlerAvatarPickerRequest != null)
-                    {
-                        handlerAvatarPickerRequest(this, Requestdata.AgentID, Requestdata.QueryID,
-                                                   Utils.BytesToString(querydata.Name));
-                    }
-                    break;
-
-                case PacketType.AgentDataUpdateRequest:
-                    AgentDataUpdateRequestPacket avRequestDataUpdatePacket = (AgentDataUpdateRequestPacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (avRequestDataUpdatePacket.AgentData.SessionID != SessionId ||
-                            avRequestDataUpdatePacket.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    handlerAgentDataUpdateRequest = OnAgentDataUpdateRequest;
-
-                    if (handlerAgentDataUpdateRequest != null)
-                    {
-                        handlerAgentDataUpdateRequest(this, avRequestDataUpdatePacket.AgentData.AgentID, avRequestDataUpdatePacket.AgentData.SessionID);
-                    }
-
-                    break;
-                
-                case PacketType.UserInfoRequest:
-                    handlerUserInfoRequest = OnUserInfoRequest;
-                    if (handlerUserInfoRequest != null)
-                    {
-                        handlerUserInfoRequest(this);
-                    }
-                    else
-                    {
-                        SendUserInfoReply(false, true, "");
-                    }
-                    break;
-                
-                case PacketType.UpdateUserInfo:
-                    UpdateUserInfoPacket updateUserInfo = (UpdateUserInfoPacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (updateUserInfo.AgentData.SessionID != SessionId ||
-                            updateUserInfo.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    handlerUpdateUserInfo = OnUpdateUserInfo;
-                    if (handlerUpdateUserInfo != null)
-                    {
-                        bool visible = true;
-                        string DirectoryVisibility =
-                                Utils.BytesToString(updateUserInfo.UserData.DirectoryVisibility);
-                        if (DirectoryVisibility == "hidden")
-                            visible = false;
-
-                        handlerUpdateUserInfo(
-                                updateUserInfo.UserData.IMViaEMail,
-                                visible, this);
-                    }
-                    break;
-                
-                case PacketType.SetStartLocationRequest:
-                    SetStartLocationRequestPacket avSetStartLocationRequestPacket = (SetStartLocationRequestPacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (avSetStartLocationRequestPacket.AgentData.SessionID != SessionId ||
-                            avSetStartLocationRequestPacket.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    if (avSetStartLocationRequestPacket.AgentData.AgentID == AgentId && avSetStartLocationRequestPacket.AgentData.SessionID == SessionId)
-                    {
-                        handlerSetStartLocationRequest = OnSetStartLocationRequest;
-                        if (handlerSetStartLocationRequest != null)
-                        {
-                            handlerSetStartLocationRequest(this, 0, avSetStartLocationRequestPacket.StartLocationData.LocationPos,
-                                                           avSetStartLocationRequestPacket.StartLocationData.LocationLookAt,
-                                                           avSetStartLocationRequestPacket.StartLocationData.LocationID);
-                        }
-                    }
-                    break;
-
-                case PacketType.AgentThrottle:
-                    AgentThrottlePacket atpack = (AgentThrottlePacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (atpack.AgentData.SessionID != SessionId ||
-                            atpack.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    m_PacketHandler.PacketQueue.SetThrottleFromClient(atpack.Throttle.Throttles);
-                    break;
-
-                case PacketType.AgentPause:
-                    m_probesWithNoIngressPackets = 0;
-                    m_clientBlocked = true;
-                    break;
-
-                case PacketType.AgentResume:
-                    m_probesWithNoIngressPackets = 0;
-                    m_clientBlocked = false;
-                    SendStartPingCheck(0);
-
-                    break;
-
-                case PacketType.ForceScriptControlRelease:
-                    handlerForceReleaseControls = OnForceReleaseControls;
-                    if (handlerForceReleaseControls != null)
-                    {
-                        handlerForceReleaseControls(this, AgentId);
-                    }
-                    break;
-
-                    #endregion
-
-                    #region Objects/m_sceneObjects
-
-                case PacketType.ObjectLink:
-                    ObjectLinkPacket link = (ObjectLinkPacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (link.AgentData.SessionID != SessionId ||
-                            link.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    uint parentprimid = 0;
-                    List<uint> childrenprims = new List<uint>();
-                    if (link.ObjectData.Length > 1)
-                    {
-                        parentprimid = link.ObjectData[0].ObjectLocalID;
-
-                        for (int i = 1; i < link.ObjectData.Length; i++)
-                        {
-                            childrenprims.Add(link.ObjectData[i].ObjectLocalID);
-                        }
-                    }
-                    handlerLinkObjects = OnLinkObjects;
-                    if (handlerLinkObjects != null)
-                    {
-                        handlerLinkObjects(this, parentprimid, childrenprims);
-                    }
-                    break;
-                
-                case PacketType.ObjectDelink:
-                    ObjectDelinkPacket delink = (ObjectDelinkPacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (delink.AgentData.SessionID != SessionId ||
-                            delink.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    // It appears the prim at index 0 is not always the root prim (for
-                    // instance, when one prim of a link set has been edited independently
-                    // of the others).  Therefore, we'll pass all the ids onto the delink
-                    // method for it to decide which is the root.
-                    List<uint> prims = new List<uint>();
-                    for (int i = 0; i < delink.ObjectData.Length; i++)
-                    {
-                        prims.Add(delink.ObjectData[i].ObjectLocalID);
-                    }
-                    handlerDelinkObjects = OnDelinkObjects;
-                    if (handlerDelinkObjects != null)
-                    {
-                        handlerDelinkObjects(prims);
-                    }
-
-                    break;
-                
-                case PacketType.ObjectAdd:
-                    if (OnAddPrim != null)
-                    {
-                        ObjectAddPacket addPacket = (ObjectAddPacket)Pack;
-
-                        #region Packet Session and User Check
-                        if (m_checkPackets)
-                        {
-                            if (addPacket.AgentData.SessionID != SessionId ||
-                                addPacket.AgentData.AgentID != AgentId)
-                                break;
-                        }
-                        #endregion
-
-                        PrimitiveBaseShape shape = GetShapeFromAddPacket(addPacket);
-                        // m_log.Info("[REZData]: " + addPacket.ToString());
-                        //BypassRaycast: 1
-                        //RayStart: <69.79469, 158.2652, 98.40343>
-                        //RayEnd: <61.97724, 141.995, 92.58341>
-                        //RayTargetID: 00000000-0000-0000-0000-000000000000
-
-                        //Check to see if adding the prim is allowed; useful for any module wanting to restrict the
-                        //object from rezing initially
-
-                        handlerAddPrim = OnAddPrim;
-                        if (handlerAddPrim != null)
-                            handlerAddPrim(AgentId, ActiveGroupId, addPacket.ObjectData.RayEnd, addPacket.ObjectData.Rotation, shape, addPacket.ObjectData.BypassRaycast, addPacket.ObjectData.RayStart, addPacket.ObjectData.RayTargetID, addPacket.ObjectData.RayEndIsIntersection);
-                    }
-                    break;
-                
-                case PacketType.ObjectShape:
-                    ObjectShapePacket shapePacket = (ObjectShapePacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (shapePacket.AgentData.SessionID != SessionId ||
-                            shapePacket.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    handlerUpdatePrimShape = null;
-                    for (int i = 0; i < shapePacket.ObjectData.Length; i++)
-                    {
-                        handlerUpdatePrimShape = OnUpdatePrimShape;
-                        if (handlerUpdatePrimShape != null)
-                        {
-                            UpdateShapeArgs shapeData = new UpdateShapeArgs();
-                            shapeData.ObjectLocalID = shapePacket.ObjectData[i].ObjectLocalID;
-                            shapeData.PathBegin = shapePacket.ObjectData[i].PathBegin;
-                            shapeData.PathCurve = shapePacket.ObjectData[i].PathCurve;
-                            shapeData.PathEnd = shapePacket.ObjectData[i].PathEnd;
-                            shapeData.PathRadiusOffset = shapePacket.ObjectData[i].PathRadiusOffset;
-                            shapeData.PathRevolutions = shapePacket.ObjectData[i].PathRevolutions;
-                            shapeData.PathScaleX = shapePacket.ObjectData[i].PathScaleX;
-                            shapeData.PathScaleY = shapePacket.ObjectData[i].PathScaleY;
-                            shapeData.PathShearX = shapePacket.ObjectData[i].PathShearX;
-                            shapeData.PathShearY = shapePacket.ObjectData[i].PathShearY;
-                            shapeData.PathSkew = shapePacket.ObjectData[i].PathSkew;
-                            shapeData.PathTaperX = shapePacket.ObjectData[i].PathTaperX;
-                            shapeData.PathTaperY = shapePacket.ObjectData[i].PathTaperY;
-                            shapeData.PathTwist = shapePacket.ObjectData[i].PathTwist;
-                            shapeData.PathTwistBegin = shapePacket.ObjectData[i].PathTwistBegin;
-                            shapeData.ProfileBegin = shapePacket.ObjectData[i].ProfileBegin;
-                            shapeData.ProfileCurve = shapePacket.ObjectData[i].ProfileCurve;
-                            shapeData.ProfileEnd = shapePacket.ObjectData[i].ProfileEnd;
-                            shapeData.ProfileHollow = shapePacket.ObjectData[i].ProfileHollow;
-
-                            handlerUpdatePrimShape(m_agentId, shapePacket.ObjectData[i].ObjectLocalID,
-                                                   shapeData);
-                        }
-                    }
-                    break;
-                
-                case PacketType.ObjectExtraParams:
-                    ObjectExtraParamsPacket extraPar = (ObjectExtraParamsPacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (extraPar.AgentData.SessionID != SessionId ||
-                            extraPar.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    handlerUpdateExtraParams = OnUpdateExtraParams;
-                    if (handlerUpdateExtraParams != null)
-                    {
-                        for (int i = 0 ; i <  extraPar.ObjectData.Length ; i++)
-                        {
-                            handlerUpdateExtraParams(m_agentId, extraPar.ObjectData[i].ObjectLocalID,
-                                                     extraPar.ObjectData[i].ParamType,
-                                                     extraPar.ObjectData[i].ParamInUse, extraPar.ObjectData[i].ParamData);
-                        }
-                    }
-                    break;
-                case PacketType.ObjectDuplicate:
-                    ObjectDuplicatePacket dupe = (ObjectDuplicatePacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (dupe.AgentData.SessionID != SessionId ||
-                            dupe.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    ObjectDuplicatePacket.AgentDataBlock AgentandGroupData = dupe.AgentData;
-
-                    handlerObjectDuplicate = null;
-
-                    for (int i = 0; i < dupe.ObjectData.Length; i++)
-                    {
-                        handlerObjectDuplicate = OnObjectDuplicate;
-                        if (handlerObjectDuplicate != null)
-                        {
-                            handlerObjectDuplicate(dupe.ObjectData[i].ObjectLocalID, dupe.SharedData.Offset,
-                                                   dupe.SharedData.DuplicateFlags, AgentandGroupData.AgentID,
-                                                   AgentandGroupData.GroupID);
-                        }
-                    }
-
-                    break;
-
-                case PacketType.RequestMultipleObjects:
-                    RequestMultipleObjectsPacket incomingRequest = (RequestMultipleObjectsPacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (incomingRequest.AgentData.SessionID != SessionId ||
-                            incomingRequest.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    handlerObjectRequest = null;
-
-                    for (int i = 0; i < incomingRequest.ObjectData.Length; i++)
-                    {
-                        handlerObjectRequest = OnObjectRequest;
-                        if (handlerObjectRequest != null)
-                        {
-                            handlerObjectRequest(incomingRequest.ObjectData[i].ID, this);
-                        }
-                    }
-                    break;
-                case PacketType.ObjectSelect:
-                    ObjectSelectPacket incomingselect = (ObjectSelectPacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (incomingselect.AgentData.SessionID != SessionId ||
-                            incomingselect.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    handlerObjectSelect = null;
-
-                    for (int i = 0; i < incomingselect.ObjectData.Length; i++)
-                    {
-                        handlerObjectSelect = OnObjectSelect;
-                        if (handlerObjectSelect != null)
-                        {
-                            handlerObjectSelect(incomingselect.ObjectData[i].ObjectLocalID, this);
-                        }
-                    }
-                    break;
-                case PacketType.ObjectDeselect:
-                    ObjectDeselectPacket incomingdeselect = (ObjectDeselectPacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (incomingdeselect.AgentData.SessionID != SessionId ||
-                            incomingdeselect.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    handlerObjectDeselect = null;
-
-                    for (int i = 0; i < incomingdeselect.ObjectData.Length; i++)
-                    {
-                        handlerObjectDeselect = OnObjectDeselect;
-                        if (handlerObjectDeselect != null)
-                        {
-                            OnObjectDeselect(incomingdeselect.ObjectData[i].ObjectLocalID, this);
-                        }
-                    }
-                    break;
-                case PacketType.ObjectPosition:
-                    // DEPRECATED: but till libsecondlife removes it, people will use it
-                    ObjectPositionPacket position = (ObjectPositionPacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (position.AgentData.SessionID != SessionId ||
-                            position.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-
-                    for (int i = 0; i < position.ObjectData.Length; i++)
-                    {
-                        handlerUpdateVector = OnUpdatePrimGroupPosition;
-                        if (handlerUpdateVector != null)
-                            handlerUpdateVector(position.ObjectData[i].ObjectLocalID, position.ObjectData[i].Position, this);
-                    }
-
-                    break;
-                case PacketType.ObjectScale:
-                    // DEPRECATED: but till libsecondlife removes it, people will use it
-                    ObjectScalePacket scale = (ObjectScalePacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (scale.AgentData.SessionID != SessionId ||
-                            scale.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    for (int i = 0; i < scale.ObjectData.Length; i++)
-                    {
-                        handlerUpdatePrimGroupScale = OnUpdatePrimGroupScale;
-                        if (handlerUpdatePrimGroupScale != null)
-                            handlerUpdatePrimGroupScale(scale.ObjectData[i].ObjectLocalID, scale.ObjectData[i].Scale, this);
-                    }
-
-                    break;
-                case PacketType.ObjectRotation:
-                    // DEPRECATED: but till libsecondlife removes it, people will use it
-                    ObjectRotationPacket rotation = (ObjectRotationPacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (rotation.AgentData.SessionID != SessionId ||
-                            rotation.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    for (int i = 0; i < rotation.ObjectData.Length; i++)
-                    {
-                        handlerUpdatePrimRotation = OnUpdatePrimGroupRotation;
-                        if (handlerUpdatePrimRotation != null)
-                            handlerUpdatePrimRotation(rotation.ObjectData[i].ObjectLocalID, rotation.ObjectData[i].Rotation, this);
-                    }
-
-                    break;
-                case PacketType.ObjectFlagUpdate:
-                    ObjectFlagUpdatePacket flags = (ObjectFlagUpdatePacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (flags.AgentData.SessionID != SessionId ||
-                            flags.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    handlerUpdatePrimFlags = OnUpdatePrimFlags;
-
-                    if (handlerUpdatePrimFlags != null)
-                    {
-                        byte[] data = Pack.ToBytes();
-                        // 46,47,48 are special positions within the packet
-                        // This may change so perhaps we need a better way
-                        // of storing this (OMV.FlagUpdatePacket.UsePhysics,etc?)
-                        bool UsePhysics = (data[46] != 0) ? true : false;
-                        bool IsTemporary = (data[47] != 0) ? true : false;
-                        bool IsPhantom = (data[48] != 0) ? true : false;
-                        handlerUpdatePrimFlags(flags.AgentData.ObjectLocalID, UsePhysics, IsTemporary, IsPhantom, this);
-                    }
-                    break;
-                case PacketType.ObjectImage:
-                    ObjectImagePacket imagePack = (ObjectImagePacket)Pack;
-
-                    handlerUpdatePrimTexture = null;
-                    for (int i = 0; i < imagePack.ObjectData.Length; i++)
-                    {
-                        handlerUpdatePrimTexture = OnUpdatePrimTexture;
-                        if (handlerUpdatePrimTexture != null)
-                        {
-                            handlerUpdatePrimTexture(imagePack.ObjectData[i].ObjectLocalID,
-                                                     imagePack.ObjectData[i].TextureEntry, this);
-                        }
-                    }
-                    break;
-                case PacketType.ObjectGrab:
-                    ObjectGrabPacket grab = (ObjectGrabPacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (grab.AgentData.SessionID != SessionId ||
-                            grab.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    handlerGrabObject = OnGrabObject;
-
-                    if (handlerGrabObject != null)
-                    {
-                        List<SurfaceTouchEventArgs> touchArgs = new List<SurfaceTouchEventArgs>();
-                        if ((grab.SurfaceInfo != null) && (grab.SurfaceInfo.Length > 0))
-                        {
-                            foreach (ObjectGrabPacket.SurfaceInfoBlock surfaceInfo in grab.SurfaceInfo)
-                            {
-                                SurfaceTouchEventArgs arg = new SurfaceTouchEventArgs();
-                                arg.Binormal = surfaceInfo.Binormal;
-                                arg.FaceIndex = surfaceInfo.FaceIndex;
-                                arg.Normal = surfaceInfo.Normal;
-                                arg.Position = surfaceInfo.Position;
-                                arg.STCoord = surfaceInfo.STCoord;
-                                arg.UVCoord = surfaceInfo.UVCoord;
-                                touchArgs.Add(arg);
-                            }
-                        }
-                        handlerGrabObject(grab.ObjectData.LocalID, grab.ObjectData.GrabOffset, this, touchArgs);
-                    }
-                    break;
-                case PacketType.ObjectGrabUpdate:
-                    ObjectGrabUpdatePacket grabUpdate = (ObjectGrabUpdatePacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (grabUpdate.AgentData.SessionID != SessionId ||
-                            grabUpdate.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    handlerGrabUpdate = OnGrabUpdate;
-
-                    if (handlerGrabUpdate != null)
-                    {
-                        List<SurfaceTouchEventArgs> touchArgs = new List<SurfaceTouchEventArgs>();
-                        if ((grabUpdate.SurfaceInfo != null) && (grabUpdate.SurfaceInfo.Length > 0))
-                        {
-                            foreach (ObjectGrabUpdatePacket.SurfaceInfoBlock surfaceInfo in grabUpdate.SurfaceInfo)
-                            {
-                                SurfaceTouchEventArgs arg = new SurfaceTouchEventArgs();
-                                arg.Binormal = surfaceInfo.Binormal;
-                                arg.FaceIndex = surfaceInfo.FaceIndex;
-                                arg.Normal = surfaceInfo.Normal;
-                                arg.Position = surfaceInfo.Position;
-                                arg.STCoord = surfaceInfo.STCoord;
-                                arg.UVCoord = surfaceInfo.UVCoord;
-                                touchArgs.Add(arg);
-                            }
-                        }
-                        handlerGrabUpdate(grabUpdate.ObjectData.ObjectID, grabUpdate.ObjectData.GrabOffsetInitial,
-                                          grabUpdate.ObjectData.GrabPosition, this, touchArgs);
-                    }
-                    break;
-                case PacketType.ObjectDeGrab:
-                    ObjectDeGrabPacket deGrab = (ObjectDeGrabPacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (deGrab.AgentData.SessionID != SessionId ||
-                            deGrab.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    handlerDeGrabObject = OnDeGrabObject;
-                    if (handlerDeGrabObject != null)
-                    {
-                        List<SurfaceTouchEventArgs> touchArgs = new List<SurfaceTouchEventArgs>();
-                        if ((deGrab.SurfaceInfo != null) && (deGrab.SurfaceInfo.Length > 0))
-                        {
-                            foreach (ObjectDeGrabPacket.SurfaceInfoBlock surfaceInfo in deGrab.SurfaceInfo)
-                            {
-                                SurfaceTouchEventArgs arg = new SurfaceTouchEventArgs();
-                                arg.Binormal = surfaceInfo.Binormal;
-                                arg.FaceIndex = surfaceInfo.FaceIndex;
-                                arg.Normal = surfaceInfo.Normal;
-                                arg.Position = surfaceInfo.Position;
-                                arg.STCoord = surfaceInfo.STCoord;
-                                arg.UVCoord = surfaceInfo.UVCoord;
-                                touchArgs.Add(arg);
-                            }
-                        }
-                        handlerDeGrabObject(deGrab.ObjectData.LocalID, this, touchArgs);
-                    }
-                    break;
-                case PacketType.ObjectSpinStart:
-                    //m_log.Warn("[CLIENT]: unhandled ObjectSpinStart packet");
-                    ObjectSpinStartPacket spinStart = (ObjectSpinStartPacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (spinStart.AgentData.SessionID != SessionId ||
-                            spinStart.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    handlerSpinStart = OnSpinStart;
-                    if (handlerSpinStart != null)
-                    {
-                        handlerSpinStart(spinStart.ObjectData.ObjectID, this);
-                    }
-                    break;
-                case PacketType.ObjectSpinUpdate:
-                    //m_log.Warn("[CLIENT]: unhandled ObjectSpinUpdate packet");
-                    ObjectSpinUpdatePacket spinUpdate = (ObjectSpinUpdatePacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (spinUpdate.AgentData.SessionID != SessionId ||
-                            spinUpdate.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    Vector3 axis;
-                    float angle;
-                    spinUpdate.ObjectData.Rotation.GetAxisAngle(out axis, out angle);
-                    //m_log.Warn("[CLIENT]: ObjectSpinUpdate packet rot axis:" + axis + " angle:" + angle);
-
-                    handlerSpinUpdate = OnSpinUpdate;
-                    if (handlerSpinUpdate != null)
-                    {
-                        handlerSpinUpdate(spinUpdate.ObjectData.ObjectID, spinUpdate.ObjectData.Rotation, this);
-                    }
-                    break;
-                case PacketType.ObjectSpinStop:
-                    //m_log.Warn("[CLIENT]: unhandled ObjectSpinStop packet");
-                    ObjectSpinStopPacket spinStop = (ObjectSpinStopPacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (spinStop.AgentData.SessionID != SessionId ||
-                            spinStop.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    handlerSpinStop = OnSpinStop;
-                    if (handlerSpinStop != null)
-                    {
-                        handlerSpinStop(spinStop.ObjectData.ObjectID, this);
-                    }
-                    break;
-
-                case PacketType.ObjectDescription:
-                    ObjectDescriptionPacket objDes = (ObjectDescriptionPacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (objDes.AgentData.SessionID != SessionId ||
-                            objDes.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    handlerObjectDescription = null;
-
-                    for (int i = 0; i < objDes.ObjectData.Length; i++)
-                    {
-                        handlerObjectDescription = OnObjectDescription;
-                        if (handlerObjectDescription != null)
-                        {
-                            handlerObjectDescription(this, objDes.ObjectData[i].LocalID,
-                                                     Util.FieldToString(objDes.ObjectData[i].Description));
-                        }
-                    }
-                    break;
-                case PacketType.ObjectName:
-                    ObjectNamePacket objName = (ObjectNamePacket)Pack;
-                    
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (objName.AgentData.SessionID != SessionId ||
-                            objName.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-                    
-                    handlerObjectName = null;
-                    for (int i = 0; i < objName.ObjectData.Length; i++)
-                    {
-                        handlerObjectName = OnObjectName;
-                        if (handlerObjectName != null)
-                        {
-                            handlerObjectName(this, objName.ObjectData[i].LocalID,
-                                              Util.FieldToString(objName.ObjectData[i].Name));
-                        }
-                    }
-                    break;
-                case PacketType.ObjectPermissions:
-                    if (OnObjectPermissions != null)
-                    {
-                        ObjectPermissionsPacket newobjPerms = (ObjectPermissionsPacket)Pack;
-
-                        #region Packet Session and User Check
-                        if (m_checkPackets)
-                        {
-                            if (newobjPerms.AgentData.SessionID != SessionId ||
-                                newobjPerms.AgentData.AgentID != AgentId)
-                                break;
-                        }
-                        #endregion
-
-                        UUID AgentID = newobjPerms.AgentData.AgentID;
-                        UUID SessionID = newobjPerms.AgentData.SessionID;
-
-                        handlerObjectPermissions = null;
-
-                        for (int i = 0; i < newobjPerms.ObjectData.Length; i++)
-                        {
-                            ObjectPermissionsPacket.ObjectDataBlock permChanges = newobjPerms.ObjectData[i];
-
-                            byte field = permChanges.Field;
-                            uint localID = permChanges.ObjectLocalID;
-                            uint mask = permChanges.Mask;
-                            byte set = permChanges.Set;
-
-                            handlerObjectPermissions = OnObjectPermissions;
-
-                            if (handlerObjectPermissions != null)
-                                handlerObjectPermissions(this, AgentID, SessionID, field, localID, mask, set);
-                        }
-                    }
-
-                    // Here's our data,
-                    // PermField contains the field the info goes into
-                    // PermField determines which mask we're changing
-                    //
-                    // chmask is the mask of the change
-                    // setTF is whether we're adding it or taking it away
-                    //
-                    // objLocalID is the localID of the object.
-
-                    // Unfortunately, we have to pass the event the packet because objData is an array
-                    // That means multiple object perms may be updated in a single packet.
-
-                    break;
-
-                case PacketType.Undo:
-                    UndoPacket undoitem = (UndoPacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (undoitem.AgentData.SessionID != SessionId ||
-                            undoitem.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    if (undoitem.ObjectData.Length > 0)
-                    {
-                        for (int i = 0; i < undoitem.ObjectData.Length; i++)
-                        {
-                            UUID objiD = undoitem.ObjectData[i].ObjectID;
-                            handlerOnUndo = OnUndo;
-                            if (handlerOnUndo != null)
-                            {
-                                handlerOnUndo(this, objiD);
-                            }
-
-                        }
-                    }
-                    break;
-                case PacketType.ObjectDuplicateOnRay:
-                    ObjectDuplicateOnRayPacket dupeOnRay = (ObjectDuplicateOnRayPacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (dupeOnRay.AgentData.SessionID != SessionId ||
-                            dupeOnRay.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    handlerObjectDuplicateOnRay = null;
-
-
-                    for (int i = 0; i < dupeOnRay.ObjectData.Length; i++)
-                    {
-                        handlerObjectDuplicateOnRay = OnObjectDuplicateOnRay;
-                        if (handlerObjectDuplicateOnRay != null)
-                        {
-                            handlerObjectDuplicateOnRay(dupeOnRay.ObjectData[i].ObjectLocalID, dupeOnRay.AgentData.DuplicateFlags,
-                                                        dupeOnRay.AgentData.AgentID, dupeOnRay.AgentData.GroupID, dupeOnRay.AgentData.RayTargetID, dupeOnRay.AgentData.RayEnd,
-                                                        dupeOnRay.AgentData.RayStart, dupeOnRay.AgentData.BypassRaycast, dupeOnRay.AgentData.RayEndIsIntersection,
-                                                        dupeOnRay.AgentData.CopyCenters, dupeOnRay.AgentData.CopyRotates);
-                        }
-                    }
-
-                    break;
-                case PacketType.RequestObjectPropertiesFamily:
-                    //This powers the little tooltip that appears when you move your mouse over an object
-                    RequestObjectPropertiesFamilyPacket packToolTip = (RequestObjectPropertiesFamilyPacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (packToolTip.AgentData.SessionID != SessionId ||
-                            packToolTip.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    RequestObjectPropertiesFamilyPacket.ObjectDataBlock packObjBlock = packToolTip.ObjectData;
-
-                    handlerRequestObjectPropertiesFamily = OnRequestObjectPropertiesFamily;
-
-                    if (handlerRequestObjectPropertiesFamily != null)
-                    {
-                        handlerRequestObjectPropertiesFamily(this, m_agentId, packObjBlock.RequestFlags,
-                                                             packObjBlock.ObjectID);
-                    }
-
-                    break;
-                case PacketType.ObjectIncludeInSearch:
-                    //This lets us set objects to appear in search (stuff like DataSnapshot, etc)
-                    ObjectIncludeInSearchPacket packInSearch = (ObjectIncludeInSearchPacket)Pack;
-                    handlerObjectIncludeInSearch = null;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (packInSearch.AgentData.SessionID != SessionId ||
-                            packInSearch.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    foreach (ObjectIncludeInSearchPacket.ObjectDataBlock objData in packInSearch.ObjectData)
-                    {
-                        bool inSearch = objData.IncludeInSearch;
-                        uint localID = objData.ObjectLocalID;
-
-                        handlerObjectIncludeInSearch = OnObjectIncludeInSearch;
-
-                        if (handlerObjectIncludeInSearch != null)
-                        {
-                            handlerObjectIncludeInSearch(this, inSearch, localID);
-                        }
-                    }
-                    break;
-
-                case PacketType.ScriptAnswerYes:
-                    ScriptAnswerYesPacket scriptAnswer = (ScriptAnswerYesPacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (scriptAnswer.AgentData.SessionID != SessionId ||
-                            scriptAnswer.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    handlerScriptAnswer = OnScriptAnswer;
-                    if (handlerScriptAnswer != null)
-                    {
-                        handlerScriptAnswer(this, scriptAnswer.Data.TaskID, scriptAnswer.Data.ItemID, scriptAnswer.Data.Questions);
-                    }
-                    break;
-
-                case PacketType.ObjectClickAction:
-                    ObjectClickActionPacket ocpacket = (ObjectClickActionPacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (ocpacket.AgentData.SessionID != SessionId ||
-                            ocpacket.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    handlerObjectClickAction = OnObjectClickAction;
-                    if (handlerObjectClickAction != null)
-                    {
-                        foreach (ObjectClickActionPacket.ObjectDataBlock odata in ocpacket.ObjectData)
-                        {
-                            byte action = odata.ClickAction;
-                            uint localID = odata.ObjectLocalID;
-                            handlerObjectClickAction(this, localID, action.ToString());
-                        }
-                    }
-                    break;
-
-                case PacketType.ObjectMaterial:
-                    ObjectMaterialPacket ompacket = (ObjectMaterialPacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (ompacket.AgentData.SessionID != SessionId ||
-                            ompacket.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    handlerObjectMaterial = OnObjectMaterial;
-                    if (handlerObjectMaterial != null)
-                    {
-                        foreach (ObjectMaterialPacket.ObjectDataBlock odata in ompacket.ObjectData)
-                        {
-                            byte material = odata.Material;
-                            uint localID = odata.ObjectLocalID;
-                            handlerObjectMaterial(this, localID, material.ToString());
-                        }
-                    }
-                    break;
-
-                    #endregion
-
-                    #region Inventory/Asset/Other related packets
-
-                case PacketType.RequestImage:
-                    RequestImagePacket imageRequest = (RequestImagePacket)Pack;
-                    //m_log.Debug("image request: " + Pack.ToString());
-                    
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (imageRequest.AgentData.SessionID != SessionId ||
-                            imageRequest.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    //handlerTextureRequest = null;
-
-                    for (int i = 0; i < imageRequest.RequestImage.Length; i++)
-                    {
-                        if (OnRequestTexture != null)
-                        {
-                            TextureRequestArgs args = new TextureRequestArgs();
-                            args.RequestedAssetID = imageRequest.RequestImage[i].Image;
-                            args.DiscardLevel = imageRequest.RequestImage[i].DiscardLevel;
-                            args.PacketNumber = imageRequest.RequestImage[i].Packet;
-                            args.Priority = imageRequest.RequestImage[i].DownloadPriority;
-                            args.requestSequence = imageRequest.Header.Sequence;
-
-                            //handlerTextureRequest = OnRequestTexture;
-
-                            //if (handlerTextureRequest != null)
-                                //OnRequestTexture(this, args);
-
-                            // in the end, we null this, so we have to check if it's null
-                            if (m_imageManager != null)
-                            {
-                                m_imageManager.EnqueueReq(args);
-                            }
-                        }
-                    }
-                    break;
-
-                case PacketType.TransferRequest:
-                    //m_log.Debug("ClientView.ProcessPackets.cs:ProcessInPacket() - Got transfer request");
-
-                    TransferRequestPacket transfer = (TransferRequestPacket)Pack;
-                    //m_log.Debug("Transfer Request: " + transfer.ToString());
-                    // Validate inventory transfers
-                    // Has to be done here, because AssetCache can't do it
-                    //
-                    
-                    if (transfer.TransferInfo.SourceType == 3)
-                    {
-                        UUID taskID = new UUID(transfer.TransferInfo.Params, 48);
-                        UUID itemID = new UUID(transfer.TransferInfo.Params, 64);
-                        UUID requestID = new UUID(transfer.TransferInfo.Params, 80);
-                        if (!(((Scene)m_scene).Permissions.BypassPermissions()))
-                        {
-                            if (taskID != UUID.Zero) // Prim
-                            {
-                                SceneObjectPart part = ((Scene)m_scene).GetSceneObjectPart(taskID);
-                                if (part == null)
-                                    break;
-
-                                if (part.OwnerID != AgentId)
-                                    break;
-
-                                if ((part.OwnerMask & (uint)PermissionMask.Modify) == 0)
-                                    break;
-
-                                TaskInventoryItem ti = part.Inventory.GetInventoryItem(itemID);
-                                if (ti == null)
-                                    break;
-
-                                if (ti.OwnerID != AgentId)
-                                    break;
-
-                                if ((ti.CurrentPermissions & ((uint)PermissionMask.Modify| (uint)PermissionMask.Copy | (uint)PermissionMask.Transfer)) != ((uint)PermissionMask.Modify| (uint)PermissionMask.Copy | (uint)PermissionMask.Transfer))
-                                    break;
-
-                                if (ti.AssetID != requestID)
-                                    break;
-                            }
-                            else // Agent
-                            {
-                                IInventoryService invService = m_scene.RequestModuleInterface<IInventoryService>();
-                                InventoryItemBase assetRequestItem = new InventoryItemBase(itemID, AgentId);
-                                assetRequestItem = invService.GetItem(assetRequestItem);
-                                if (assetRequestItem == null)
-                                {
-                                    assetRequestItem = ((Scene)m_scene).CommsManager.UserProfileCacheService.LibraryRoot.FindItem(itemID);
-                                    if (assetRequestItem == null)
-                                        return;
-                                }
-
-                                // At this point, we need to apply perms
-                                // only to notecards and scripts. All
-                                // other asset types are always available
-                                //
-                                if (assetRequestItem.AssetType == 10)
-                                {
-                                    if (!((Scene)m_scene).Permissions.CanViewScript(itemID, UUID.Zero, AgentId))
-                                    {
-                                        SendAgentAlertMessage("Insufficient permissions to view script", false);
-                                        break;
-                                    }
-                                }
-                                else if (assetRequestItem.AssetType == 7)
-                                {
-                                    if (!((Scene)m_scene).Permissions.CanViewNotecard(itemID, UUID.Zero, AgentId))
-                                    {
-                                        SendAgentAlertMessage("Insufficient permissions to view notecard", false);
-                                        break;
-                                    }
-                                }
-
-                                if (assetRequestItem.AssetID != requestID)
-                                    break;
-                            }
-                        }
-                    }
-
-                    //m_assetCache.AddAssetRequest(this, transfer);
-
-                    MakeAssetRequest(transfer);
-
-                    /* RequestAsset = OnRequestAsset;
-                         if (RequestAsset != null)
-                         {
-                             RequestAsset(this, transfer);
-                         }*/
-                    break;
-                case PacketType.AssetUploadRequest:
-                    AssetUploadRequestPacket request = (AssetUploadRequestPacket)Pack;
-
-                    
-                    // m_log.Debug("upload request " + request.ToString());
-                    // m_log.Debug("upload request was for assetid: " + request.AssetBlock.TransactionID.Combine(this.SecureSessionId).ToString());
-                    UUID temp = UUID.Combine(request.AssetBlock.TransactionID, SecureSessionId);
-
-                    handlerAssetUploadRequest = OnAssetUploadRequest;
-
-                    if (handlerAssetUploadRequest != null)
-                    {
-                        handlerAssetUploadRequest(this, temp,
-                                                  request.AssetBlock.TransactionID, request.AssetBlock.Type,
-                                                  request.AssetBlock.AssetData, request.AssetBlock.StoreLocal,
-                                                  request.AssetBlock.Tempfile);
-                    }
-                    break;
-                case PacketType.RequestXfer:
-                    RequestXferPacket xferReq = (RequestXferPacket)Pack;
-                    
-                    handlerRequestXfer = OnRequestXfer;
-
-                    if (handlerRequestXfer != null)
-                    {
-                        handlerRequestXfer(this, xferReq.XferID.ID, Util.FieldToString(xferReq.XferID.Filename));
-                    }
-                    break;
-                case PacketType.SendXferPacket:
-                    SendXferPacketPacket xferRec = (SendXferPacketPacket)Pack;
-
-                    handlerXferReceive = OnXferReceive;
-                    if (handlerXferReceive != null)
-                    {
-                        handlerXferReceive(this, xferRec.XferID.ID, xferRec.XferID.Packet, xferRec.DataPacket.Data);
-                    }
-                    break;
-                case PacketType.ConfirmXferPacket:
-                    ConfirmXferPacketPacket confirmXfer = (ConfirmXferPacketPacket)Pack;
-                    
-                    handlerConfirmXfer = OnConfirmXfer;
-                    if (handlerConfirmXfer != null)
-                    {
-                        handlerConfirmXfer(this, confirmXfer.XferID.ID, confirmXfer.XferID.Packet);
-                    }
-                    break;
-                case PacketType.AbortXfer:
-                    AbortXferPacket abortXfer = (AbortXferPacket)Pack;
-                    handlerAbortXfer = OnAbortXfer;
-                    if (handlerAbortXfer != null)
-                    {
-                        handlerAbortXfer(this, abortXfer.XferID.ID);
-                    }
-
-                    break;
-                case PacketType.CreateInventoryFolder:
-                    CreateInventoryFolderPacket invFolder = (CreateInventoryFolderPacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (invFolder.AgentData.SessionID != SessionId ||
-                            invFolder.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    handlerCreateInventoryFolder = OnCreateNewInventoryFolder;
-                    if (handlerCreateInventoryFolder != null)
-                    {
-                        handlerCreateInventoryFolder(this, invFolder.FolderData.FolderID,
-                                                     (ushort)invFolder.FolderData.Type,
-                                                     Util.FieldToString(invFolder.FolderData.Name),
-                                                     invFolder.FolderData.ParentID);
-                    }
-                    break;
-                case PacketType.UpdateInventoryFolder:
-                    if (OnUpdateInventoryFolder != null)
-                    {
-                        UpdateInventoryFolderPacket invFolderx = (UpdateInventoryFolderPacket)Pack;
-
-                        #region Packet Session and User Check
-                        if (m_checkPackets)
-                        {
-                            if (invFolderx.AgentData.SessionID != SessionId ||
-                                invFolderx.AgentData.AgentID != AgentId)
-                                break;
-                        }
-                        #endregion
-
-                        handlerUpdateInventoryFolder = null;
-
-                        for (int i = 0; i < invFolderx.FolderData.Length; i++)
-                        {
-                            handlerUpdateInventoryFolder = OnUpdateInventoryFolder;
-                            if (handlerUpdateInventoryFolder != null)
-                            {
-                                OnUpdateInventoryFolder(this, invFolderx.FolderData[i].FolderID,
-                                                        (ushort)invFolderx.FolderData[i].Type,
-                                                        Util.FieldToString(invFolderx.FolderData[i].Name),
-                                                        invFolderx.FolderData[i].ParentID);
-                            }
-                        }
-                    }
-                    break;
-                case PacketType.MoveInventoryFolder:
-                    if (OnMoveInventoryFolder != null)
-                    {
-                        MoveInventoryFolderPacket invFoldery = (MoveInventoryFolderPacket)Pack;
-
-                        #region Packet Session and User Check
-                        if (m_checkPackets)
-                        {
-                            if (invFoldery.AgentData.SessionID != SessionId ||
-                                invFoldery.AgentData.AgentID != AgentId)
-                                break;
-                        }
-                        #endregion
-
-                        handlerMoveInventoryFolder = null;
-
-                        for (int i = 0; i < invFoldery.InventoryData.Length; i++)
-                        {
-                            handlerMoveInventoryFolder = OnMoveInventoryFolder;
-                            if (handlerMoveInventoryFolder != null)
-                            {
-                                OnMoveInventoryFolder(this, invFoldery.InventoryData[i].FolderID,
-                                                      invFoldery.InventoryData[i].ParentID);
-                            }
-                        }
-                    }
-                    break;
-                case PacketType.CreateInventoryItem:
-                    CreateInventoryItemPacket createItem = (CreateInventoryItemPacket)Pack;
-                    
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (createItem.AgentData.SessionID != SessionId ||
-                            createItem.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    handlerCreateNewInventoryItem = OnCreateNewInventoryItem;
-                    if (handlerCreateNewInventoryItem != null)
-                    {
-                        handlerCreateNewInventoryItem(this, createItem.InventoryBlock.TransactionID,
-                                                      createItem.InventoryBlock.FolderID,
-                                                      createItem.InventoryBlock.CallbackID,
-                                                      Util.FieldToString(createItem.InventoryBlock.Description),
-                                                      Util.FieldToString(createItem.InventoryBlock.Name),
-                                                      createItem.InventoryBlock.InvType,
-                                                      createItem.InventoryBlock.Type,
-                                                      createItem.InventoryBlock.WearableType,
-                                                      createItem.InventoryBlock.NextOwnerMask,
-                                                      Util.UnixTimeSinceEpoch());
-                    }
-                    break;
-                case PacketType.FetchInventory:
-                    if (OnFetchInventory != null)
-                    {
-                        FetchInventoryPacket FetchInventoryx = (FetchInventoryPacket)Pack;
-
-                        #region Packet Session and User Check
-                        if (m_checkPackets)
-                        {
-                            if (FetchInventoryx.AgentData.SessionID != SessionId ||
-                                FetchInventoryx.AgentData.AgentID != AgentId)
-                                break;
-                        }
-                        #endregion
-
-                        handlerFetchInventory = null;
-
-                        for (int i = 0; i < FetchInventoryx.InventoryData.Length; i++)
-                        {
-                            handlerFetchInventory = OnFetchInventory;
-
-                            if (handlerFetchInventory != null)
-                            {
-                                OnFetchInventory(this, FetchInventoryx.InventoryData[i].ItemID,
-                                                 FetchInventoryx.InventoryData[i].OwnerID);
-                            }
-                        }
-                    }
-                    break;
-                case PacketType.FetchInventoryDescendents:
-                    FetchInventoryDescendentsPacket Fetch = (FetchInventoryDescendentsPacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (Fetch.AgentData.SessionID != SessionId ||
-                            Fetch.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    handlerFetchInventoryDescendents = OnFetchInventoryDescendents;
-                    if (handlerFetchInventoryDescendents != null)
-                    {
-                        handlerFetchInventoryDescendents(this, Fetch.InventoryData.FolderID, Fetch.InventoryData.OwnerID,
-                                                         Fetch.InventoryData.FetchFolders, Fetch.InventoryData.FetchItems,
-                                                         Fetch.InventoryData.SortOrder);
-                    }
-                    break;
-                case PacketType.PurgeInventoryDescendents:
-                    PurgeInventoryDescendentsPacket Purge = (PurgeInventoryDescendentsPacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (Purge.AgentData.SessionID != SessionId ||
-                            Purge.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    handlerPurgeInventoryDescendents = OnPurgeInventoryDescendents;
-                    if (handlerPurgeInventoryDescendents != null)
-                    {
-                        handlerPurgeInventoryDescendents(this, Purge.InventoryData.FolderID);
-                    }
-                    break;
-                case PacketType.UpdateInventoryItem:
-                    UpdateInventoryItemPacket inventoryItemUpdate = (UpdateInventoryItemPacket)Pack;
-                    
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (inventoryItemUpdate.AgentData.SessionID != SessionId ||
-                            inventoryItemUpdate.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    if (OnUpdateInventoryItem != null)
-                    {
-                        handlerUpdateInventoryItem = null;
-                        for (int i = 0; i < inventoryItemUpdate.InventoryData.Length; i++)
-                        {
-                            handlerUpdateInventoryItem = OnUpdateInventoryItem;
-
-                            if (handlerUpdateInventoryItem != null)
-                            {
-                                InventoryItemBase itemUpd = new InventoryItemBase();
-                                itemUpd.ID = inventoryItemUpdate.InventoryData[i].ItemID;
-                                itemUpd.Name = Util.FieldToString(inventoryItemUpdate.InventoryData[i].Name);
-                                itemUpd.Description = Util.FieldToString(inventoryItemUpdate.InventoryData[i].Description);
-                                itemUpd.GroupID = inventoryItemUpdate.InventoryData[i].GroupID;
-                                itemUpd.GroupOwned = inventoryItemUpdate.InventoryData[i].GroupOwned;
-                                itemUpd.GroupPermissions = inventoryItemUpdate.InventoryData[i].GroupMask;
-                                itemUpd.NextPermissions = inventoryItemUpdate.InventoryData[i].NextOwnerMask;
-                                itemUpd.EveryOnePermissions = inventoryItemUpdate.InventoryData[i].EveryoneMask;
-                                itemUpd.CreationDate = inventoryItemUpdate.InventoryData[i].CreationDate;
-                                itemUpd.Folder = inventoryItemUpdate.InventoryData[i].FolderID;
-                                itemUpd.InvType = inventoryItemUpdate.InventoryData[i].InvType;
-                                itemUpd.SalePrice = inventoryItemUpdate.InventoryData[i].SalePrice;
-                                itemUpd.SaleType = inventoryItemUpdate.InventoryData[i].SaleType;
-                                itemUpd.Flags = inventoryItemUpdate.InventoryData[i].Flags;
-                                /*
-                                    OnUpdateInventoryItem(this, inventoryItemUpdate.InventoryData[i].TransactionID,
-                                                          inventoryItemUpdate.InventoryData[i].ItemID,
-                                                          Util.FieldToString(inventoryItemUpdate.InventoryData[i].Name),
-                                                          Util.FieldToString(inventoryItemUpdate.InventoryData[i].Description),
-                                                          inventoryItemUpdate.InventoryData[i].NextOwnerMask);
-                                    */
-                                OnUpdateInventoryItem(this, inventoryItemUpdate.InventoryData[i].TransactionID,
-                                                      inventoryItemUpdate.InventoryData[i].ItemID,
-                                                      itemUpd);
-                            }
-                        }
-                    }
-                    //m_log.Debug(Pack.ToString());
-                    /*for (int i = 0; i < inventoryItemUpdate.InventoryData.Length; i++)
-                        {
-                            if (inventoryItemUpdate.InventoryData[i].TransactionID != UUID.Zero)
-                            {
-                                AssetBase asset = m_assetCache.GetAsset(inventoryItemUpdate.InventoryData[i].TransactionID.Combine(this.SecureSessionId));
-                                if (asset != null)
-                                {
-                                    // m_log.Debug("updating inventory item, found asset" + asset.FullID.ToString() + " already in cache");
-                                    m_inventoryCache.UpdateInventoryItemAsset(this, inventoryItemUpdate.InventoryData[i].ItemID, asset);
-                                }
-                                else
-                                {
-                                    asset = this.UploadAssets.AddUploadToAssetCache(inventoryItemUpdate.InventoryData[i].TransactionID);
-                                    if (asset != null)
-                                    {
-                                        //m_log.Debug("updating inventory item, adding asset" + asset.FullID.ToString() + " to cache");
-                                        m_inventoryCache.UpdateInventoryItemAsset(this, inventoryItemUpdate.InventoryData[i].ItemID, asset);
-                                    }
-                                    else
-                                    {
-                                        //m_log.Debug("trying to update inventory item, but asset is null");
-                                    }
-                                }
-                            }
-                            else
-                            {
-                                m_inventoryCache.UpdateInventoryItemDetails(this, inventoryItemUpdate.InventoryData[i].ItemID, inventoryItemUpdate.InventoryData[i]); ;
-                            }
-                        }*/
-                    break;
-                case PacketType.CopyInventoryItem:
-                    CopyInventoryItemPacket copyitem = (CopyInventoryItemPacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (copyitem.AgentData.SessionID != SessionId ||
-                            copyitem.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    handlerCopyInventoryItem = null;
-                    if (OnCopyInventoryItem != null)
-                    {
-                        foreach (CopyInventoryItemPacket.InventoryDataBlock datablock in copyitem.InventoryData)
-                        {
-                            handlerCopyInventoryItem = OnCopyInventoryItem;
-                            if (handlerCopyInventoryItem != null)
-                            {
-                                handlerCopyInventoryItem(this, datablock.CallbackID, datablock.OldAgentID,
-                                                         datablock.OldItemID, datablock.NewFolderID,
-                                                         Util.FieldToString(datablock.NewName));
-                            }
-                        }
-                    }
-                    break;
-                case PacketType.MoveInventoryItem:
-                    MoveInventoryItemPacket moveitem = (MoveInventoryItemPacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (moveitem.AgentData.SessionID != SessionId ||
-                            moveitem.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    if (OnMoveInventoryItem != null)
-                    {
-                        handlerMoveInventoryItem = null;
-                        InventoryItemBase itm = null;
-                        List<InventoryItemBase> items = new List<InventoryItemBase>();
-                        foreach (MoveInventoryItemPacket.InventoryDataBlock datablock in moveitem.InventoryData)
-                        {
-                            itm = new InventoryItemBase(datablock.ItemID, AgentId);
-                            itm.Folder = datablock.FolderID;
-                            itm.Name = Util.FieldToString(datablock.NewName);
-                            // weird, comes out as empty string
-                            //m_log.DebugFormat("[XXX] new name: {0}", itm.Name);
-                            items.Add(itm);
-                        }
-                        handlerMoveInventoryItem = OnMoveInventoryItem;
-                        if (handlerMoveInventoryItem != null)
-                        {
-                            handlerMoveInventoryItem(this, items);
-                        }
-                    }
-                    break;
-                case PacketType.RemoveInventoryItem:
-                    RemoveInventoryItemPacket removeItem = (RemoveInventoryItemPacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (removeItem.AgentData.SessionID != SessionId ||
-                            removeItem.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    if (OnRemoveInventoryItem != null)
-                    {
-                        handlerRemoveInventoryItem = null;
-                        List<UUID> uuids = new List<UUID>();
-                        foreach (RemoveInventoryItemPacket.InventoryDataBlock datablock in removeItem.InventoryData)
-                        {
-                            uuids.Add(datablock.ItemID);
-                        }
-                        handlerRemoveInventoryItem = OnRemoveInventoryItem;
-                        if (handlerRemoveInventoryItem != null)
-                        {
-                            handlerRemoveInventoryItem(this, uuids);
-                        }
-
-                    }
-                    break;
-                case PacketType.RemoveInventoryFolder:
-                    RemoveInventoryFolderPacket removeFolder = (RemoveInventoryFolderPacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (removeFolder.AgentData.SessionID != SessionId ||
-                            removeFolder.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    if (OnRemoveInventoryFolder != null)
-                    {
-                        handlerRemoveInventoryFolder = null;
-                        List<UUID> uuids = new List<UUID>();
-                        foreach (RemoveInventoryFolderPacket.FolderDataBlock datablock in removeFolder.FolderData)
-                        {
-                            uuids.Add(datablock.FolderID);
-                        }
-                        handlerRemoveInventoryFolder = OnRemoveInventoryFolder;
-                        if (handlerRemoveInventoryFolder != null)
-                        {
-                            handlerRemoveInventoryFolder(this, uuids);
-                        }
-                    }
-                    break;
-                case PacketType.RemoveInventoryObjects:
-                    RemoveInventoryObjectsPacket removeObject = (RemoveInventoryObjectsPacket)Pack;
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (removeObject.AgentData.SessionID != SessionId ||
-                            removeObject.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-                    if (OnRemoveInventoryFolder != null)
-                    {
-                        handlerRemoveInventoryFolder = null;
-                        List<UUID> uuids = new List<UUID>();
-                        foreach (RemoveInventoryObjectsPacket.FolderDataBlock datablock in removeObject.FolderData)
-                        {
-                            uuids.Add(datablock.FolderID);
-                        }
-                        handlerRemoveInventoryFolder = OnRemoveInventoryFolder;
-                        if (handlerRemoveInventoryFolder != null)
-                        {
-                            handlerRemoveInventoryFolder(this, uuids);
-                        }
-                    }
-
-                    if (OnRemoveInventoryItem != null)
-                    {
-                        handlerRemoveInventoryItem = null;
-                        List<UUID> uuids = new List<UUID>();
-                        foreach (RemoveInventoryObjectsPacket.ItemDataBlock datablock in removeObject.ItemData)
-                        {
-                            uuids.Add(datablock.ItemID);
-                        }
-                        handlerRemoveInventoryItem = OnRemoveInventoryItem;
-                        if (handlerRemoveInventoryItem != null)
-                        {
-                            handlerRemoveInventoryItem(this, uuids);
-                        }
-                    }
-                    break;
-                case PacketType.RequestTaskInventory:
-                    RequestTaskInventoryPacket requesttask = (RequestTaskInventoryPacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (requesttask.AgentData.SessionID != SessionId ||
-                            requesttask.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    handlerRequestTaskInventory = OnRequestTaskInventory;
-                    if (handlerRequestTaskInventory != null)
-                    {
-                        handlerRequestTaskInventory(this, requesttask.InventoryData.LocalID);
-                    }
-                    break;
-                case PacketType.UpdateTaskInventory:
-                    UpdateTaskInventoryPacket updatetask = (UpdateTaskInventoryPacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (updatetask.AgentData.SessionID != SessionId ||
-                            updatetask.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    if (OnUpdateTaskInventory != null)
-                    {
-                        if (updatetask.UpdateData.Key == 0)
-                        {
-                            handlerUpdateTaskInventory = OnUpdateTaskInventory;
-                            if (handlerUpdateTaskInventory != null)
-                            {
-                                TaskInventoryItem newTaskItem = new TaskInventoryItem();
-                                newTaskItem.ItemID = updatetask.InventoryData.ItemID;
-                                newTaskItem.ParentID = updatetask.InventoryData.FolderID;
-                                newTaskItem.CreatorID = updatetask.InventoryData.CreatorID;
-                                newTaskItem.OwnerID = updatetask.InventoryData.OwnerID;
-                                newTaskItem.GroupID = updatetask.InventoryData.GroupID;
-                                newTaskItem.BasePermissions = updatetask.InventoryData.BaseMask;
-                                newTaskItem.CurrentPermissions = updatetask.InventoryData.OwnerMask;
-                                newTaskItem.GroupPermissions = updatetask.InventoryData.GroupMask;
-                                newTaskItem.EveryonePermissions = updatetask.InventoryData.EveryoneMask;
-                                newTaskItem.NextPermissions = updatetask.InventoryData.NextOwnerMask;
-                                //newTaskItem.GroupOwned=updatetask.InventoryData.GroupOwned;
-                                newTaskItem.Type = updatetask.InventoryData.Type;
-                                newTaskItem.InvType = updatetask.InventoryData.InvType;
-                                newTaskItem.Flags = updatetask.InventoryData.Flags;
-                                //newTaskItem.SaleType=updatetask.InventoryData.SaleType;
-                                //newTaskItem.SalePrice=updatetask.InventoryData.SalePrice;;
-                                newTaskItem.Name = Util.FieldToString(updatetask.InventoryData.Name);
-                                newTaskItem.Description = Util.FieldToString(updatetask.InventoryData.Description);
-                                newTaskItem.CreationDate = (uint)updatetask.InventoryData.CreationDate;
-                                handlerUpdateTaskInventory(this, updatetask.InventoryData.TransactionID,
-                                                           newTaskItem, updatetask.UpdateData.LocalID);
-                            }
-                        }
-                    }
-
-                    break;
-
-                case PacketType.RemoveTaskInventory:
-
-                    RemoveTaskInventoryPacket removeTask = (RemoveTaskInventoryPacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (removeTask.AgentData.SessionID != SessionId ||
-                            removeTask.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    handlerRemoveTaskItem = OnRemoveTaskItem;
-
-                    if (handlerRemoveTaskItem != null)
-                    {
-                        handlerRemoveTaskItem(this, removeTask.InventoryData.ItemID, removeTask.InventoryData.LocalID);
-                    }
-
-                    break;
-
-                case PacketType.MoveTaskInventory:
-
-                    MoveTaskInventoryPacket moveTaskInventoryPacket = (MoveTaskInventoryPacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (moveTaskInventoryPacket.AgentData.SessionID != SessionId ||
-                            moveTaskInventoryPacket.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    handlerMoveTaskItem = OnMoveTaskItem;
-
-                    if (handlerMoveTaskItem != null)
-                    {
-                        handlerMoveTaskItem(
-                            this, moveTaskInventoryPacket.AgentData.FolderID,
-                            moveTaskInventoryPacket.InventoryData.LocalID,
-                            moveTaskInventoryPacket.InventoryData.ItemID);
-                    }
-
-                    break;
-
-                case PacketType.RezScript:
-                    //m_log.Debug(Pack.ToString());
-                    RezScriptPacket rezScriptx = (RezScriptPacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (rezScriptx.AgentData.SessionID != SessionId ||
-                            rezScriptx.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    handlerRezScript = OnRezScript;
-                    InventoryItemBase item = new InventoryItemBase();
-                    item.ID = rezScriptx.InventoryBlock.ItemID;
-                    item.Folder = rezScriptx.InventoryBlock.FolderID;
-                    item.CreatorId = rezScriptx.InventoryBlock.CreatorID.ToString();
-                    item.Owner = rezScriptx.InventoryBlock.OwnerID;
-                    item.BasePermissions = rezScriptx.InventoryBlock.BaseMask;
-                    item.CurrentPermissions = rezScriptx.InventoryBlock.OwnerMask;
-                    item.EveryOnePermissions = rezScriptx.InventoryBlock.EveryoneMask;
-                    item.NextPermissions = rezScriptx.InventoryBlock.NextOwnerMask;
-                    item.GroupPermissions = rezScriptx.InventoryBlock.GroupMask;
-                    item.GroupOwned = rezScriptx.InventoryBlock.GroupOwned;
-                    item.GroupID = rezScriptx.InventoryBlock.GroupID;
-                    item.AssetType = rezScriptx.InventoryBlock.Type;
-                    item.InvType = rezScriptx.InventoryBlock.InvType;
-                    item.Flags = rezScriptx.InventoryBlock.Flags;
-                    item.SaleType = rezScriptx.InventoryBlock.SaleType;
-                    item.SalePrice = rezScriptx.InventoryBlock.SalePrice;
-                    item.Name = Util.FieldToString(rezScriptx.InventoryBlock.Name);
-                    item.Description = Util.FieldToString(rezScriptx.InventoryBlock.Description);
-                    item.CreationDate = rezScriptx.InventoryBlock.CreationDate;
-
-                    if (handlerRezScript != null)
-                    {
-                        handlerRezScript(this, item, rezScriptx.InventoryBlock.TransactionID, rezScriptx.UpdateBlock.ObjectLocalID);
-                    }
-                    break;
-
-                case PacketType.MapLayerRequest:
-                    RequestMapLayer();
-                    break;
-                case PacketType.MapBlockRequest:
-                    MapBlockRequestPacket MapRequest = (MapBlockRequestPacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (MapRequest.AgentData.SessionID != SessionId ||
-                            MapRequest.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    handlerRequestMapBlocks = OnRequestMapBlocks;
-                    if (handlerRequestMapBlocks != null)
-                    {
-                        handlerRequestMapBlocks(this, MapRequest.PositionData.MinX, MapRequest.PositionData.MinY,
-                                                MapRequest.PositionData.MaxX, MapRequest.PositionData.MaxY, MapRequest.AgentData.Flags);
-                    }
-                    break;
-                case PacketType.MapNameRequest:
-                    MapNameRequestPacket map = (MapNameRequestPacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (map.AgentData.SessionID != SessionId ||
-                            map.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    string mapName = Util.UTF8.GetString(map.NameData.Name, 0,
-                                                             map.NameData.Name.Length - 1);
-                    handlerMapNameRequest = OnMapNameRequest;
-                    if (handlerMapNameRequest != null)
-                    {
-                        handlerMapNameRequest(this, mapName);
-                    }
-                    break;
-                case PacketType.TeleportLandmarkRequest:
-                    TeleportLandmarkRequestPacket tpReq = (TeleportLandmarkRequestPacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (tpReq.Info.SessionID != SessionId ||
-                            tpReq.Info.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    UUID lmid = tpReq.Info.LandmarkID;
-                    AssetLandmark lm;
-                    if (lmid != UUID.Zero)
-                    {
-                        //AssetBase lma = m_assetCache.GetAsset(lmid, false);
-                        AssetBase lma = m_assetService.Get(lmid.ToString());
-
-                        if (lma == null)
-                        {
-                            // Failed to find landmark
-                            TeleportCancelPacket tpCancel = (TeleportCancelPacket)PacketPool.Instance.GetPacket(PacketType.TeleportCancel);
-                            tpCancel.Info.SessionID = tpReq.Info.SessionID;
-                            tpCancel.Info.AgentID = tpReq.Info.AgentID;
-                            OutPacket(tpCancel, ThrottleOutPacketType.Task);
-                        }
-
-                        try
-                        {
-                            lm = new AssetLandmark(lma);
-                        }
-                        catch (NullReferenceException)
-                        {
-                            // asset not found generates null ref inside the assetlandmark constructor.
-                            TeleportCancelPacket tpCancel = (TeleportCancelPacket)PacketPool.Instance.GetPacket(PacketType.TeleportCancel);
-                            tpCancel.Info.SessionID = tpReq.Info.SessionID;
-                            tpCancel.Info.AgentID = tpReq.Info.AgentID;
-                            OutPacket(tpCancel, ThrottleOutPacketType.Task);
-                            break;
-                        }
-                    }
-                    else
-                    {
-                        // Teleport home request
-                        handlerTeleportHomeRequest = OnTeleportHomeRequest;
-                        if (handlerTeleportHomeRequest != null)
-                        {
-                            handlerTeleportHomeRequest(AgentId, this);
-                        }
-                        break;
-                    }
-
-                    handlerTeleportLandmarkRequest = OnTeleportLandmarkRequest;
-                    if (handlerTeleportLandmarkRequest != null)
-                    {
-                        handlerTeleportLandmarkRequest(this, lm.RegionID, lm.Position);
-                    }
-                    else
-                    {
-                        //no event handler so cancel request
-
-
-                        TeleportCancelPacket tpCancel = (TeleportCancelPacket)PacketPool.Instance.GetPacket(PacketType.TeleportCancel);
-                        tpCancel.Info.AgentID = tpReq.Info.AgentID;
-                        tpCancel.Info.SessionID = tpReq.Info.SessionID;
-                        OutPacket(tpCancel, ThrottleOutPacketType.Task);
-
-                    }
-                    break;
-
-                case PacketType.TeleportLocationRequest:
-                    TeleportLocationRequestPacket tpLocReq = (TeleportLocationRequestPacket)Pack;
-                    // m_log.Debug(tpLocReq.ToString());
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (tpLocReq.AgentData.SessionID != SessionId ||
-                            tpLocReq.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    handlerTeleportLocationRequest = OnTeleportLocationRequest;
-                    if (handlerTeleportLocationRequest != null)
-                    {
-                        handlerTeleportLocationRequest(this, tpLocReq.Info.RegionHandle, tpLocReq.Info.Position,
-                                                       tpLocReq.Info.LookAt, 16);
-                    }
-                    else
-                    {
-                        //no event handler so cancel request
-                        TeleportCancelPacket tpCancel = (TeleportCancelPacket)PacketPool.Instance.GetPacket(PacketType.TeleportCancel);
-                        tpCancel.Info.SessionID = tpLocReq.AgentData.SessionID;
-                        tpCancel.Info.AgentID = tpLocReq.AgentData.AgentID;
-                        OutPacket(tpCancel, ThrottleOutPacketType.Task);
-                    }
-                    break;
-
-                    #endregion
-
-                case PacketType.UUIDNameRequest:
-                    UUIDNameRequestPacket incoming = (UUIDNameRequestPacket)Pack;
-
-                    foreach (UUIDNameRequestPacket.UUIDNameBlockBlock UUIDBlock in incoming.UUIDNameBlock)
-                    {
-                        handlerNameRequest = OnNameFromUUIDRequest;
-                        if (handlerNameRequest != null)
-                        {
-                            handlerNameRequest(UUIDBlock.ID, this);
-                        }
-                    }
-                    break;
-
-                    #region Parcel related packets
-
-                case PacketType.RegionHandleRequest:
-                    RegionHandleRequestPacket rhrPack = (RegionHandleRequestPacket)Pack;
-
-                    handlerRegionHandleRequest = OnRegionHandleRequest;
-                    if (handlerRegionHandleRequest != null)
-                    {
-                        handlerRegionHandleRequest(this, rhrPack.RequestBlock.RegionID);
-                    }
-                    break;
-
-                case PacketType.ParcelInfoRequest:
-                    ParcelInfoRequestPacket pirPack = (ParcelInfoRequestPacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (pirPack.AgentData.SessionID != SessionId ||
-                            pirPack.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    handlerParcelInfoRequest = OnParcelInfoRequest;
-                    if (handlerParcelInfoRequest != null)
-                    {
-                        handlerParcelInfoRequest(this, pirPack.Data.ParcelID);
-                    }
-                    break;
-
-                case PacketType.ParcelAccessListRequest:
-                    ParcelAccessListRequestPacket requestPacket = (ParcelAccessListRequestPacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (requestPacket.AgentData.SessionID != SessionId ||
-                            requestPacket.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    handlerParcelAccessListRequest = OnParcelAccessListRequest;
-
-                    if (handlerParcelAccessListRequest != null)
-                    {
-                        handlerParcelAccessListRequest(requestPacket.AgentData.AgentID, requestPacket.AgentData.SessionID,
-                                                       requestPacket.Data.Flags, requestPacket.Data.SequenceID,
-                                                       requestPacket.Data.LocalID, this);
-                    }
-                    break;
-
-                case PacketType.ParcelAccessListUpdate:
-                    ParcelAccessListUpdatePacket updatePacket = (ParcelAccessListUpdatePacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (updatePacket.AgentData.SessionID != SessionId ||
-                            updatePacket.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    List<ParcelManager.ParcelAccessEntry> entries = new List<ParcelManager.ParcelAccessEntry>();
-                    foreach (ParcelAccessListUpdatePacket.ListBlock block in updatePacket.List)
-                    {
-                        ParcelManager.ParcelAccessEntry entry = new ParcelManager.ParcelAccessEntry();
-                        entry.AgentID = block.ID;
-                        entry.Flags = (AccessList)block.Flags;
-                        entry.Time = new DateTime();
-                        entries.Add(entry);
-                    }
-
-                    handlerParcelAccessListUpdateRequest = OnParcelAccessListUpdateRequest;
-                    if (handlerParcelAccessListUpdateRequest != null)
-                    {
-                        handlerParcelAccessListUpdateRequest(updatePacket.AgentData.AgentID,
-                                                             updatePacket.AgentData.SessionID, updatePacket.Data.Flags,
-                                                             updatePacket.Data.LocalID, entries, this);
-                    }
-                    break;
-                case PacketType.ParcelPropertiesRequest:
-
-                    ParcelPropertiesRequestPacket propertiesRequest = (ParcelPropertiesRequestPacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (propertiesRequest.AgentData.SessionID != SessionId ||
-                            propertiesRequest.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    handlerParcelPropertiesRequest = OnParcelPropertiesRequest;
-                    if (handlerParcelPropertiesRequest != null)
-                    {
-                        handlerParcelPropertiesRequest((int)Math.Round(propertiesRequest.ParcelData.West),
-                                                       (int)Math.Round(propertiesRequest.ParcelData.South),
-                                                       (int)Math.Round(propertiesRequest.ParcelData.East),
-                                                       (int)Math.Round(propertiesRequest.ParcelData.North),
-                                                       propertiesRequest.ParcelData.SequenceID,
-                                                       propertiesRequest.ParcelData.SnapSelection, this);
-                    }
-                    break;
-                case PacketType.ParcelDivide:
-                    ParcelDividePacket landDivide = (ParcelDividePacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (landDivide.AgentData.SessionID != SessionId ||
-                            landDivide.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    handlerParcelDivideRequest = OnParcelDivideRequest;
-                    if (handlerParcelDivideRequest != null)
-                    {
-                        handlerParcelDivideRequest((int)Math.Round(landDivide.ParcelData.West),
-                                                   (int)Math.Round(landDivide.ParcelData.South),
-                                                   (int)Math.Round(landDivide.ParcelData.East),
-                                                   (int)Math.Round(landDivide.ParcelData.North), this);
-                    }
-                    break;
-                case PacketType.ParcelJoin:
-                    ParcelJoinPacket landJoin = (ParcelJoinPacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (landJoin.AgentData.SessionID != SessionId ||
-                            landJoin.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    handlerParcelJoinRequest = OnParcelJoinRequest;
-
-                    if (handlerParcelJoinRequest != null)
-                    {
-                        handlerParcelJoinRequest((int)Math.Round(landJoin.ParcelData.West),
-                                                 (int)Math.Round(landJoin.ParcelData.South),
-                                                 (int)Math.Round(landJoin.ParcelData.East),
-                                                 (int)Math.Round(landJoin.ParcelData.North), this);
-                    }
-                    break;
-                case PacketType.ParcelPropertiesUpdate:
-                    ParcelPropertiesUpdatePacket parcelPropertiesPacket = (ParcelPropertiesUpdatePacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (parcelPropertiesPacket.AgentData.SessionID != SessionId ||
-                            parcelPropertiesPacket.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    handlerParcelPropertiesUpdateRequest = OnParcelPropertiesUpdateRequest;
-
-                    if (handlerParcelPropertiesUpdateRequest != null)
-                    {
-                        LandUpdateArgs args = new LandUpdateArgs();
-
-                        args.AuthBuyerID = parcelPropertiesPacket.ParcelData.AuthBuyerID;
-                        args.Category = (ParcelCategory)parcelPropertiesPacket.ParcelData.Category;
-                        args.Desc = Utils.BytesToString(parcelPropertiesPacket.ParcelData.Desc);
-                        args.GroupID = parcelPropertiesPacket.ParcelData.GroupID;
-                        args.LandingType = parcelPropertiesPacket.ParcelData.LandingType;
-                        args.MediaAutoScale = parcelPropertiesPacket.ParcelData.MediaAutoScale;
-                        args.MediaID = parcelPropertiesPacket.ParcelData.MediaID;
-                        args.MediaURL = Utils.BytesToString(parcelPropertiesPacket.ParcelData.MediaURL);
-                        args.MusicURL = Utils.BytesToString(parcelPropertiesPacket.ParcelData.MusicURL);
-                        args.Name = Utils.BytesToString(parcelPropertiesPacket.ParcelData.Name);
-                        args.ParcelFlags = parcelPropertiesPacket.ParcelData.ParcelFlags;
-                        args.PassHours = parcelPropertiesPacket.ParcelData.PassHours;
-                        args.PassPrice = parcelPropertiesPacket.ParcelData.PassPrice;
-                        args.SalePrice = parcelPropertiesPacket.ParcelData.SalePrice;
-                        args.SnapshotID = parcelPropertiesPacket.ParcelData.SnapshotID;
-                        args.UserLocation = parcelPropertiesPacket.ParcelData.UserLocation;
-                        args.UserLookAt = parcelPropertiesPacket.ParcelData.UserLookAt;
-                        handlerParcelPropertiesUpdateRequest(args, parcelPropertiesPacket.ParcelData.LocalID, this);
-                    }
-                    break;
-                case PacketType.ParcelSelectObjects:
-                    ParcelSelectObjectsPacket selectPacket = (ParcelSelectObjectsPacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (selectPacket.AgentData.SessionID != SessionId ||
-                            selectPacket.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    List<UUID> returnIDs = new List<UUID>();
-
-                    foreach (ParcelSelectObjectsPacket.ReturnIDsBlock rb in
-                             selectPacket.ReturnIDs)
-                    {
-                        returnIDs.Add(rb.ReturnID);
-                    }
-
-                    handlerParcelSelectObjects = OnParcelSelectObjects;
-
-                    if (handlerParcelSelectObjects != null)
-                    {
-                        handlerParcelSelectObjects(selectPacket.ParcelData.LocalID,
-                                                   Convert.ToInt32(selectPacket.ParcelData.ReturnType), returnIDs, this);
-                    }
-                    break;
-                case PacketType.ParcelObjectOwnersRequest:
-                    //m_log.Debug(Pack.ToString());
-                    ParcelObjectOwnersRequestPacket reqPacket = (ParcelObjectOwnersRequestPacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (reqPacket.AgentData.SessionID != SessionId ||
-                            reqPacket.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    handlerParcelObjectOwnerRequest = OnParcelObjectOwnerRequest;
-
-                    if (handlerParcelObjectOwnerRequest != null)
-                    {
-                        handlerParcelObjectOwnerRequest(reqPacket.ParcelData.LocalID, this);
-                    }
-                    break;
-                case PacketType.ParcelGodForceOwner:
-                    ParcelGodForceOwnerPacket godForceOwnerPacket = (ParcelGodForceOwnerPacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (godForceOwnerPacket.AgentData.SessionID != SessionId ||
-                            godForceOwnerPacket.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    handlerParcelGodForceOwner = OnParcelGodForceOwner;
-                    if (handlerParcelGodForceOwner != null)
-                    {
-                        handlerParcelGodForceOwner(godForceOwnerPacket.Data.LocalID, godForceOwnerPacket.Data.OwnerID, this);
-                    }
-                    break;
-                case PacketType.ParcelRelease:
-                    ParcelReleasePacket releasePacket = (ParcelReleasePacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (releasePacket.AgentData.SessionID != SessionId ||
-                            releasePacket.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    handlerParcelAbandonRequest = OnParcelAbandonRequest;
-                    if (handlerParcelAbandonRequest != null)
-                    {
-                        handlerParcelAbandonRequest(releasePacket.Data.LocalID, this);
-                    }
-                    break;
-                case PacketType.ParcelReclaim:
-                    ParcelReclaimPacket reclaimPacket = (ParcelReclaimPacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (reclaimPacket.AgentData.SessionID != SessionId ||
-                            reclaimPacket.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    handlerParcelReclaim = OnParcelReclaim;
-                    if (handlerParcelReclaim != null)
-                    {
-                        handlerParcelReclaim(reclaimPacket.Data.LocalID, this);
-                    }
-                    break;
-                case PacketType.ParcelReturnObjects:
-
-
-                    ParcelReturnObjectsPacket parcelReturnObjects = (ParcelReturnObjectsPacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (parcelReturnObjects.AgentData.SessionID != SessionId ||
-                            parcelReturnObjects.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    UUID[] puserselectedOwnerIDs = new UUID[parcelReturnObjects.OwnerIDs.Length];
-                    for (int parceliterator = 0; parceliterator < parcelReturnObjects.OwnerIDs.Length; parceliterator++)
-                        puserselectedOwnerIDs[parceliterator] = parcelReturnObjects.OwnerIDs[parceliterator].OwnerID;
-
-                    UUID[] puserselectedTaskIDs = new UUID[parcelReturnObjects.TaskIDs.Length];
-
-                    for (int parceliterator = 0; parceliterator < parcelReturnObjects.TaskIDs.Length; parceliterator++)
-                        puserselectedTaskIDs[parceliterator] = parcelReturnObjects.TaskIDs[parceliterator].TaskID;
-
-                    handlerParcelReturnObjectsRequest = OnParcelReturnObjectsRequest;
-                    if (handlerParcelReturnObjectsRequest != null)
-                    {
-                        handlerParcelReturnObjectsRequest(parcelReturnObjects.ParcelData.LocalID, parcelReturnObjects.ParcelData.ReturnType, puserselectedOwnerIDs, puserselectedTaskIDs, this);
-
-                    }
-                    break;
-
-                case PacketType.ParcelSetOtherCleanTime:
-                    ParcelSetOtherCleanTimePacket parcelSetOtherCleanTimePacket = (ParcelSetOtherCleanTimePacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (parcelSetOtherCleanTimePacket.AgentData.SessionID != SessionId ||
-                            parcelSetOtherCleanTimePacket.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    handlerParcelSetOtherCleanTime = OnParcelSetOtherCleanTime;
-                    if (handlerParcelSetOtherCleanTime != null)
-                    {
-                        handlerParcelSetOtherCleanTime(this,
-                                                       parcelSetOtherCleanTimePacket.ParcelData.LocalID,
-                                                       parcelSetOtherCleanTimePacket.ParcelData.OtherCleanTime);
-                    }
-                    break;
-
-                case PacketType.LandStatRequest:
-                    LandStatRequestPacket lsrp = (LandStatRequestPacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (lsrp.AgentData.SessionID != SessionId ||
-                            lsrp.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    handlerLandStatRequest = OnLandStatRequest;
-                    if (handlerLandStatRequest != null)
-                    {
-                        handlerLandStatRequest(lsrp.RequestData.ParcelLocalID, lsrp.RequestData.ReportType, lsrp.RequestData.RequestFlags, Utils.BytesToString(lsrp.RequestData.Filter), this);
-                    }
-                    break;
-
-                case PacketType.ParcelDwellRequest:
-                    ParcelDwellRequestPacket dwellrq =
-                            (ParcelDwellRequestPacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (dwellrq.AgentData.SessionID != SessionId ||
-                            dwellrq.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    handlerParcelDwellRequest = OnParcelDwellRequest;
-                    if (handlerParcelDwellRequest != null)
-                    {
-                        handlerParcelDwellRequest(dwellrq.Data.LocalID, this);
-                    }
-                    break;
-
-                    #endregion
-
-                    #region Estate Packets
-
-                case PacketType.EstateOwnerMessage:
-                    EstateOwnerMessagePacket messagePacket = (EstateOwnerMessagePacket)Pack;
-                    //m_log.Debug(messagePacket.ToString());
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (messagePacket.AgentData.SessionID != SessionId ||
-                            messagePacket.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    switch (Utils.BytesToString(messagePacket.MethodData.Method))
-                    {
-                        case "getinfo":
-                            if (((Scene)m_scene).Permissions.CanIssueEstateCommand(AgentId, false))
-                            {
-                                OnDetailedEstateDataRequest(this, messagePacket.MethodData.Invoice);
-                            }
-                            break;
-                        case "setregioninfo":
-                            if (((Scene)m_scene).Permissions.CanIssueEstateCommand(AgentId, false))
-                            {
-                                OnSetEstateFlagsRequest(convertParamStringToBool(messagePacket.ParamList[0].Parameter), convertParamStringToBool(messagePacket.ParamList[1].Parameter),
-                                                        convertParamStringToBool(messagePacket.ParamList[2].Parameter), !convertParamStringToBool(messagePacket.ParamList[3].Parameter),
-                                                        Convert.ToInt16(Convert.ToDecimal(Utils.BytesToString(messagePacket.ParamList[4].Parameter))),
-                                                        (float)Convert.ToDecimal(Utils.BytesToString(messagePacket.ParamList[5].Parameter)),
-                                                        Convert.ToInt16(Utils.BytesToString(messagePacket.ParamList[6].Parameter)),
-                                                        convertParamStringToBool(messagePacket.ParamList[7].Parameter), convertParamStringToBool(messagePacket.ParamList[8].Parameter));
-                            }
-                            break;
-//                            case "texturebase":
-//                                if (((Scene)m_scene).Permissions.CanIssueEstateCommand(AgentId, false))
-//                                {
-//                                    foreach (EstateOwnerMessagePacket.ParamListBlock block in messagePacket.ParamList)
-//                                    {
-//                                        string s = Utils.BytesToString(block.Parameter);
-//                                        string[] splitField = s.Split(' ');
-//                                        if (splitField.Length == 2)
-//                                        {
-//                                            UUID tempUUID = new UUID(splitField[1]);
-//                                            OnSetEstateTerrainBaseTexture(this, Convert.ToInt16(splitField[0]), tempUUID);
-//                                        }
-//                                    }
-//                                }
-//                                break;
-                        case "texturedetail":
-                            if (((Scene)m_scene).Permissions.CanIssueEstateCommand(AgentId, false))
-                            {
-                                foreach (EstateOwnerMessagePacket.ParamListBlock block in messagePacket.ParamList)
-                                {
-                                    string s = Utils.BytesToString(block.Parameter);
-                                    string[] splitField = s.Split(' ');
-                                    if (splitField.Length == 2)
-                                    {
-                                        Int16 corner = Convert.ToInt16(splitField[0]);
-                                        UUID textureUUID = new UUID(splitField[1]);
-
-                                        OnSetEstateTerrainDetailTexture(this, corner, textureUUID);
-                                    }
-                                }
-                            }
-
-                            break;
-                        case "textureheights":
-                            if (((Scene)m_scene).Permissions.CanIssueEstateCommand(AgentId, false))
-                            {
-                                foreach (EstateOwnerMessagePacket.ParamListBlock block in messagePacket.ParamList)
-                                {
-                                    string s = Utils.BytesToString(block.Parameter);
-                                    string[] splitField = s.Split(' ');
-                                    if (splitField.Length == 3)
-                                    {
-                                        Int16 corner = Convert.ToInt16(splitField[0]);
-                                        float lowValue = (float)Convert.ToDecimal(splitField[1]);
-                                        float highValue = (float)Convert.ToDecimal(splitField[2]);
-
-                                        OnSetEstateTerrainTextureHeights(this, corner, lowValue, highValue);
-                                    }
-                                }
-                            }
-                            break;
-                        case "texturecommit":
-                            OnCommitEstateTerrainTextureRequest(this);
-                            break;
-                        case "setregionterrain":
-                            if (((Scene)m_scene).Permissions.CanIssueEstateCommand(AgentId, false))
-                            {
-                                if (messagePacket.ParamList.Length != 9)
-                                {
-                                    m_log.Error("EstateOwnerMessage: SetRegionTerrain method has a ParamList of invalid length");
-                                }
-                                else
-                                {
-                                    try
-                                    {
-                                        string tmp = Utils.BytesToString(messagePacket.ParamList[0].Parameter);
-                                        if (!tmp.Contains(".")) tmp += ".00";
-                                        float WaterHeight = (float)Convert.ToDecimal(tmp);
-                                        tmp = Utils.BytesToString(messagePacket.ParamList[1].Parameter);
-                                        if (!tmp.Contains(".")) tmp += ".00";
-                                        float TerrainRaiseLimit = (float)Convert.ToDecimal(tmp);
-                                        tmp = Utils.BytesToString(messagePacket.ParamList[2].Parameter);
-                                        if (!tmp.Contains(".")) tmp += ".00";
-                                        float TerrainLowerLimit = (float)Convert.ToDecimal(tmp);
-                                        bool UseEstateSun = convertParamStringToBool(messagePacket.ParamList[3].Parameter);
-                                        bool UseFixedSun = convertParamStringToBool(messagePacket.ParamList[4].Parameter);
-                                        float SunHour = (float)Convert.ToDecimal(Utils.BytesToString(messagePacket.ParamList[5].Parameter));
-                                        bool UseGlobal = convertParamStringToBool(messagePacket.ParamList[6].Parameter);
-                                        bool EstateFixedSun = convertParamStringToBool(messagePacket.ParamList[7].Parameter);
-                                        float EstateSunHour = (float)Convert.ToDecimal(Utils.BytesToString(messagePacket.ParamList[8].Parameter));
-
-                                        OnSetRegionTerrainSettings(WaterHeight, TerrainRaiseLimit, TerrainLowerLimit, UseEstateSun, UseFixedSun, SunHour, UseGlobal, EstateFixedSun, EstateSunHour);
-
-                                    }
-                                    catch (Exception ex)
-                                    {
-                                        m_log.Error("EstateOwnerMessage: Exception while setting terrain settings: \n" + messagePacket + "\n" + ex);
-                                    }
-                                }
-                            }
-
-                            break;
-                        case "restart":
-                            if (((Scene)m_scene).Permissions.CanIssueEstateCommand(AgentId, false))
-                            {
-                                // There's only 1 block in the estateResetSim..   and that's the number of seconds till restart.
-                                foreach (EstateOwnerMessagePacket.ParamListBlock block in messagePacket.ParamList)
-                                {
-                                    float timeSeconds;
-                                    Utils.TryParseSingle(Utils.BytesToString(block.Parameter), out timeSeconds);
-                                    timeSeconds = (int)timeSeconds;
-                                    OnEstateRestartSimRequest(this, (int)timeSeconds);
-
-                                }
-                            }
-                            break;
-                        case "estatechangecovenantid":
-                            if (((Scene)m_scene).Permissions.CanIssueEstateCommand(AgentId, false))
-                            {
-                                foreach (EstateOwnerMessagePacket.ParamListBlock block in messagePacket.ParamList)
-                                {
-                                    UUID newCovenantID = new UUID(Utils.BytesToString(block.Parameter));
-                                    OnEstateChangeCovenantRequest(this, newCovenantID);
-                                }
-                            }
-                            break;
-                        case "estateaccessdelta": // Estate access delta manages the banlist and allow list too.
-                            if (((Scene)m_scene).Permissions.CanIssueEstateCommand(AgentId, false))
-                            {
-                                int estateAccessType = Convert.ToInt16(Utils.BytesToString(messagePacket.ParamList[1].Parameter));
-                                OnUpdateEstateAccessDeltaRequest(this, messagePacket.MethodData.Invoice, estateAccessType, new UUID(Utils.BytesToString(messagePacket.ParamList[2].Parameter)));
-
-                            }
-                            break;
-                        case "simulatormessage":
-                            if (((Scene)m_scene).Permissions.CanIssueEstateCommand(AgentId, false))
-                            {
-                                UUID invoice = messagePacket.MethodData.Invoice;
-                                UUID SenderID = new UUID(Utils.BytesToString(messagePacket.ParamList[2].Parameter));
-                                string SenderName = Utils.BytesToString(messagePacket.ParamList[3].Parameter);
-                                string Message = Utils.BytesToString(messagePacket.ParamList[4].Parameter);
-                                UUID sessionID = messagePacket.AgentData.SessionID;
-                                OnSimulatorBlueBoxMessageRequest(this, invoice, SenderID, sessionID, SenderName, Message);
-                            }
-                            break;
-                        case "instantmessage":
-                            if (((Scene)m_scene).Permissions.CanIssueEstateCommand(AgentId, false))
-                            {
-                                if (messagePacket.ParamList.Length < 5)
-                                    break;
-                                UUID invoice = messagePacket.MethodData.Invoice;
-                                UUID SenderID = new UUID(Utils.BytesToString(messagePacket.ParamList[2].Parameter));
-                                string SenderName = Utils.BytesToString(messagePacket.ParamList[3].Parameter);
-                                string Message = Utils.BytesToString(messagePacket.ParamList[4].Parameter);
-                                UUID sessionID = messagePacket.AgentData.SessionID;
-                                OnEstateBlueBoxMessageRequest(this, invoice, SenderID, sessionID, SenderName, Message);
-                            }
-                            break;
-                        case "setregiondebug":
-                            if (((Scene)m_scene).Permissions.CanIssueEstateCommand(AgentId, false))
-                            {
-                                UUID invoice = messagePacket.MethodData.Invoice;
-                                UUID SenderID = messagePacket.AgentData.AgentID;
-                                bool scripted = convertParamStringToBool(messagePacket.ParamList[0].Parameter);
-                                bool collisionEvents = convertParamStringToBool(messagePacket.ParamList[1].Parameter);
-                                bool physics = convertParamStringToBool(messagePacket.ParamList[2].Parameter);
-
-                                OnEstateDebugRegionRequest(this, invoice, SenderID, scripted, collisionEvents, physics);
-                            }
-                            break;
-                        case "teleporthomeuser":
-                            if (((Scene)m_scene).Permissions.CanIssueEstateCommand(AgentId, false))
-                            {
-                                UUID invoice = messagePacket.MethodData.Invoice;
-                                UUID SenderID = messagePacket.AgentData.AgentID;
-                                UUID Prey;
-
-                                UUID.TryParse(Utils.BytesToString(messagePacket.ParamList[1].Parameter), out Prey);
-
-                                OnEstateTeleportOneUserHomeRequest(this, invoice, SenderID, Prey);
-                            }
-                            break;
-                        case "teleporthomeallusers":
-                            if (((Scene)m_scene).Permissions.CanIssueEstateCommand(AgentId, false))
-                            {
-                                UUID invoice = messagePacket.MethodData.Invoice;
-                                UUID SenderID = messagePacket.AgentData.AgentID;
-                                OnEstateTeleportAllUsersHomeRequest(this, invoice, SenderID);
-                            }
-                            break;
-                        case "colliders":
-                            handlerLandStatRequest = OnLandStatRequest;
-                            if (handlerLandStatRequest != null)
-                            {
-                                handlerLandStatRequest(0, 1, 0, "", this);
-                            }
-                            break;
-                        case "scripts":
-                            handlerLandStatRequest = OnLandStatRequest;
-                            if (handlerLandStatRequest != null)
-                            {
-                                handlerLandStatRequest(0, 0, 0, "", this);
-                            }
-                            break;
-                        case "terrain":
-                            if (((Scene)m_scene).Permissions.CanIssueEstateCommand(AgentId, false))
-                            {
-                                if (messagePacket.ParamList.Length > 0)
-                                {
-                                    if (Utils.BytesToString(messagePacket.ParamList[0].Parameter) == "bake")
-                                    {
-                                        handlerBakeTerrain = OnBakeTerrain;
-                                        if (handlerBakeTerrain != null)
-                                        {
-                                            handlerBakeTerrain(this);
-                                        }
-                                    }
-                                    if (Utils.BytesToString(messagePacket.ParamList[0].Parameter) == "download filename")
-                                    {
-                                        if (messagePacket.ParamList.Length > 1)
-                                        {
-                                            handlerRequestTerrain = OnRequestTerrain;
-                                            if (handlerRequestTerrain != null)
-                                            {
-                                                handlerRequestTerrain(this, Utils.BytesToString(messagePacket.ParamList[1].Parameter));
-                                            }
-                                        }
-                                    }
-                                    if (Utils.BytesToString(messagePacket.ParamList[0].Parameter) == "upload filename")
-                                    {
-                                        if (messagePacket.ParamList.Length > 1)
-                                        {
-                                            handlerUploadTerrain = OnUploadTerrain;
-                                            if (handlerUploadTerrain != null)
-                                            {
-                                                handlerUploadTerrain(this, Utils.BytesToString(messagePacket.ParamList[1].Parameter));
-                                            }
-                                        }
-                                    }
-
-                                }
-
-
-                            }
-                            break;
-
-                        case "estatechangeinfo":
-                            if (((Scene)m_scene).Permissions.CanIssueEstateCommand(AgentId, false))
-                            {
-                                UUID invoice = messagePacket.MethodData.Invoice;
-                                UUID SenderID = messagePacket.AgentData.AgentID;
-                                UInt32 param1 = Convert.ToUInt32(Utils.BytesToString(messagePacket.ParamList[1].Parameter));
-                                UInt32 param2 = Convert.ToUInt32(Utils.BytesToString(messagePacket.ParamList[2].Parameter));
-
-                                handlerEstateChangeInfo = OnEstateChangeInfo;
-                                if (handlerEstateChangeInfo != null)
-                                {
-                                    handlerEstateChangeInfo(this, invoice, SenderID, param1, param2);
-                                }
-                            }
-                            break;
-
-                        default:
-                            m_log.Error("EstateOwnerMessage: Unknown method requested\n" + messagePacket);
-                            break;
-                    }
- 
-                    //int parcelID, uint reportType, uint requestflags, string filter
-
-                    //lsrp.RequestData.ParcelLocalID;
-                    //lsrp.RequestData.ReportType; // 1 = colliders, 0 = scripts
-                    //lsrp.RequestData.RequestFlags;
-                    //lsrp.RequestData.Filter;
-
-                    break;
-
-                case PacketType.RequestRegionInfo:
-                    RequestRegionInfoPacket.AgentDataBlock mPacket = ((RequestRegionInfoPacket)Pack).AgentData;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (mPacket.SessionID != SessionId ||
-                            mPacket.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    handlerRegionInfoRequest = OnRegionInfoRequest;
-                    if (handlerRegionInfoRequest != null)
-                    {
-                        handlerRegionInfoRequest(this);
-                    }
-                    break;
-                case PacketType.EstateCovenantRequest:
-
-                    //EstateCovenantRequestPacket.AgentDataBlock epack =
-                    //     ((EstateCovenantRequestPacket)Pack).AgentData;
-
-                    handlerEstateCovenantRequest = OnEstateCovenantRequest;
-                    if (handlerEstateCovenantRequest != null)
-                    {
-                        handlerEstateCovenantRequest(this);
-                    }
-                    break;
-
-                    #endregion
-
-                    #region GodPackets
-
-                case PacketType.RequestGodlikePowers:
-                    RequestGodlikePowersPacket rglpPack = (RequestGodlikePowersPacket)Pack;
-                    RequestGodlikePowersPacket.RequestBlockBlock rblock = rglpPack.RequestBlock;
-                    UUID token = rblock.Token;
-
-                    RequestGodlikePowersPacket.AgentDataBlock ablock = rglpPack.AgentData;
-
-                    handlerReqGodlikePowers = OnRequestGodlikePowers;
-
-                    if (handlerReqGodlikePowers != null)
-                    {
-                        handlerReqGodlikePowers(ablock.AgentID, ablock.SessionID, token, rblock.Godlike, this);
-                    }
-
-                    break;
-                case PacketType.GodKickUser:
-                    GodKickUserPacket gkupack = (GodKickUserPacket)Pack;
-
-                    if (gkupack.UserInfo.GodSessionID == SessionId && AgentId == gkupack.UserInfo.GodID)
-                    {
-                        handlerGodKickUser = OnGodKickUser;
-                        if (handlerGodKickUser != null)
-                        {
-                            handlerGodKickUser(gkupack.UserInfo.GodID, gkupack.UserInfo.GodSessionID,
-                                               gkupack.UserInfo.AgentID, (uint)0, gkupack.UserInfo.Reason);
-                        }
-                    }
-                    else
-                    {
-                        SendAgentAlertMessage("Kick request denied", false);
-                    }
-                    //KickUserPacket kupack = new KickUserPacket();
-                    //KickUserPacket.UserInfoBlock kupackib = kupack.UserInfo;
-
-                    //kupack.UserInfo.AgentID = gkupack.UserInfo.AgentID;
-                    //kupack.UserInfo.SessionID = gkupack.UserInfo.GodSessionID;
-
-                    //kupack.TargetBlock.TargetIP = (uint)0;
-                    //kupack.TargetBlock.TargetPort = (ushort)0;
-                    //kupack.UserInfo.Reason = gkupack.UserInfo.Reason;
-
-                    //OutPacket(kupack, ThrottleOutPacketType.Task);
-                    break;
-
-                    #endregion
-
-                    #region Economy/Transaction Packets
-
-                case PacketType.MoneyBalanceRequest:
-                    MoneyBalanceRequestPacket moneybalancerequestpacket = (MoneyBalanceRequestPacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (moneybalancerequestpacket.AgentData.SessionID != SessionId ||
-                            moneybalancerequestpacket.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    handlerMoneyBalanceRequest = OnMoneyBalanceRequest;
-
-                    if (handlerMoneyBalanceRequest != null)
-                    {
-                        handlerMoneyBalanceRequest(this, moneybalancerequestpacket.AgentData.AgentID, moneybalancerequestpacket.AgentData.SessionID, moneybalancerequestpacket.MoneyData.TransactionID);
-                    }
-
-                    break;
-                case PacketType.EconomyDataRequest:
-
-                    
-                    handlerEconomoyDataRequest = OnEconomyDataRequest;
-                    if (handlerEconomoyDataRequest != null)
-                    {
-                        handlerEconomoyDataRequest(AgentId);
-                    }
-                    break;
-                case PacketType.RequestPayPrice:
-                    RequestPayPricePacket requestPayPricePacket = (RequestPayPricePacket)Pack;
-
-                    handlerRequestPayPrice = OnRequestPayPrice;
-                    if (handlerRequestPayPrice != null)
-                    {
-                        handlerRequestPayPrice(this, requestPayPricePacket.ObjectData.ObjectID);
-                    }
-                    break;
-
-                case PacketType.ObjectSaleInfo:
-                    ObjectSaleInfoPacket objectSaleInfoPacket = (ObjectSaleInfoPacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (objectSaleInfoPacket.AgentData.SessionID != SessionId ||
-                            objectSaleInfoPacket.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    handlerObjectSaleInfo = OnObjectSaleInfo;
-                    if (handlerObjectSaleInfo != null)
-                    {
-                        foreach (ObjectSaleInfoPacket.ObjectDataBlock d
-                            in objectSaleInfoPacket.ObjectData)
-                        {
-                            handlerObjectSaleInfo(this,
-                                                  objectSaleInfoPacket.AgentData.AgentID,
-                                                  objectSaleInfoPacket.AgentData.SessionID,
-                                                  d.LocalID,
-                                                  d.SaleType,
-                                                  d.SalePrice);
-                        }
-                    }
-                    break;
-
-                case PacketType.ObjectBuy:
-                    ObjectBuyPacket objectBuyPacket = (ObjectBuyPacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (objectBuyPacket.AgentData.SessionID != SessionId ||
-                            objectBuyPacket.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    handlerObjectBuy = OnObjectBuy;
-
-                    if (handlerObjectBuy != null)
-                    {
-                        foreach (ObjectBuyPacket.ObjectDataBlock d
-                            in objectBuyPacket.ObjectData)
-                        {
-                            handlerObjectBuy(this,
-                                             objectBuyPacket.AgentData.AgentID,
-                                             objectBuyPacket.AgentData.SessionID,
-                                             objectBuyPacket.AgentData.GroupID,
-                                             objectBuyPacket.AgentData.CategoryID,
-                                             d.ObjectLocalID,
-                                             d.SaleType,
-                                             d.SalePrice);
-                        }
-                    }
-                    break;
-
-                    #endregion
-
-                    #region Script Packets
-
-                case PacketType.GetScriptRunning:
-                    GetScriptRunningPacket scriptRunning = (GetScriptRunningPacket)Pack;
-
-                    handlerGetScriptRunning = OnGetScriptRunning;
-                    if (handlerGetScriptRunning != null)
-                    {
-                        handlerGetScriptRunning(this, scriptRunning.Script.ObjectID, scriptRunning.Script.ItemID);
-                    }
-                    break;
-
-                case PacketType.SetScriptRunning:
-                    SetScriptRunningPacket setScriptRunning = (SetScriptRunningPacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (setScriptRunning.AgentData.SessionID != SessionId ||
-                            setScriptRunning.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    handlerSetScriptRunning = OnSetScriptRunning;
-                    if (handlerSetScriptRunning != null)
-                    {
-                        handlerSetScriptRunning(this, setScriptRunning.Script.ObjectID, setScriptRunning.Script.ItemID, setScriptRunning.Script.Running);
-                    }
-                    break;
-
-                case PacketType.ScriptReset:
-                    ScriptResetPacket scriptResetPacket = (ScriptResetPacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (scriptResetPacket.AgentData.SessionID != SessionId ||
-                            scriptResetPacket.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    handlerScriptReset = OnScriptReset;
-                    if (handlerScriptReset != null)
-                    {
-                        handlerScriptReset(this, scriptResetPacket.Script.ObjectID, scriptResetPacket.Script.ItemID);
-                    }
-                    break;
-
-                    #endregion
-
-                    #region Gesture Managment
-
-                case PacketType.ActivateGestures:
-                    ActivateGesturesPacket activateGesturePacket = (ActivateGesturesPacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (activateGesturePacket.AgentData.SessionID != SessionId ||
-                            activateGesturePacket.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    handlerActivateGesture = OnActivateGesture;
-                    if (handlerActivateGesture != null)
-                    {
-                        handlerActivateGesture(this,
-                                               activateGesturePacket.Data[0].AssetID,
-                                               activateGesturePacket.Data[0].ItemID);
-                    }
-                    else m_log.Error("Null pointer for activateGesture");
-
-                    break;
-
-                case PacketType.DeactivateGestures:
-                    DeactivateGesturesPacket deactivateGesturePacket = (DeactivateGesturesPacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (deactivateGesturePacket.AgentData.SessionID != SessionId ||
-                            deactivateGesturePacket.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    handlerDeactivateGesture = OnDeactivateGesture;
-                    if (handlerDeactivateGesture != null)
-                    {
-                        handlerDeactivateGesture(this, deactivateGesturePacket.Data[0].ItemID);
-                    }
-                    break;
-                case PacketType.ObjectOwner:
-                    ObjectOwnerPacket objectOwnerPacket = (ObjectOwnerPacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (objectOwnerPacket.AgentData.SessionID != SessionId ||
-                            objectOwnerPacket.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    List<uint> localIDs = new List<uint>();
-
-                    foreach (ObjectOwnerPacket.ObjectDataBlock d in objectOwnerPacket.ObjectData)
-                        localIDs.Add(d.ObjectLocalID);
-
-                    handlerObjectOwner = OnObjectOwner;
-                    if (handlerObjectOwner != null)
-                    {
-                        handlerObjectOwner(this, objectOwnerPacket.HeaderData.OwnerID, objectOwnerPacket.HeaderData.GroupID, localIDs);
-                    }
-                    break;
-
-                    #endregion
-
-
-                    #region unimplemented handlers
-
-                case PacketType.StartPingCheck:
-                    // Send the client the ping response back
-                    // Pass the same PingID in the matching packet
-                    // Handled In the packet processing
-                    //m_log.Debug("[CLIENT]: possibly unhandled StartPingCheck packet");
-                    break;
-                case PacketType.CompletePingCheck:
-                    // TODO: Perhaps this should be processed on the Sim to determine whether or not to drop a dead client
-                    //m_log.Warn("[CLIENT]: unhandled CompletePingCheck packet");
-                    break;
-
-                case PacketType.ViewerStats:
-                    // TODO: handle this packet
-                    //m_log.Warn("[CLIENT]: unhandled ViewerStats packet");
-                    break;
-
-                case PacketType.MapItemRequest:
-                    MapItemRequestPacket mirpk = (MapItemRequestPacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (mirpk.AgentData.SessionID != SessionId ||
-                            mirpk.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    //m_log.Debug(mirpk.ToString());
-                    handlerMapItemRequest = OnMapItemRequest;
-                    if (handlerMapItemRequest != null)
-                    {
-                        handlerMapItemRequest(this,mirpk.AgentData.Flags, mirpk.AgentData.EstateID,
-                                              mirpk.AgentData.Godlike,mirpk.RequestData.ItemType,
-                                              mirpk.RequestData.RegionHandle);
-
-                    }
-                    break;
-
-                case PacketType.TransferAbort:
-                    // TODO: handle this packet
-                    //m_log.Warn("[CLIENT]: unhandled TransferAbort packet");
-                    break;
-                case PacketType.MuteListRequest:
-                    MuteListRequestPacket muteListRequest =
-                            (MuteListRequestPacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (muteListRequest.AgentData.SessionID != SessionId ||
-                            muteListRequest.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    handlerMuteListRequest = OnMuteListRequest;
-                    if (handlerMuteListRequest != null)
-                    {
-                        handlerMuteListRequest(this, muteListRequest.MuteData.MuteCRC);
-                    }
-                    else
-                    {
-                        SendUseCachedMuteList();
-                    }
-                    break;
-                case PacketType.UseCircuitCode:
-                    // Don't display this one, we handle it at a lower level
-                    break;
-
-                case PacketType.AgentHeightWidth:
-                    // TODO: handle this packet
-                    //m_log.Warn("[CLIENT]: unhandled AgentHeightWidth packet");
-                    break;
-
-                case PacketType.InventoryDescendents:
-                    // TODO: handle this packet
-                    //m_log.Warn("[CLIENT]: unhandled InventoryDescent packet");
-
-                    break;
-                case PacketType.DirPlacesQuery:
-                    DirPlacesQueryPacket dirPlacesQueryPacket = (DirPlacesQueryPacket)Pack;
-                    //m_log.Debug(dirPlacesQueryPacket.ToString());
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (dirPlacesQueryPacket.AgentData.SessionID != SessionId ||
-                            dirPlacesQueryPacket.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    handlerDirPlacesQuery = OnDirPlacesQuery;
-                    if (handlerDirPlacesQuery != null)
-                    {
-                        handlerDirPlacesQuery(this,
-                                              dirPlacesQueryPacket.QueryData.QueryID,
-                                              Utils.BytesToString(
-                                                  dirPlacesQueryPacket.QueryData.QueryText),
-                                              (int)dirPlacesQueryPacket.QueryData.QueryFlags,
-                                              (int)dirPlacesQueryPacket.QueryData.Category,
-                                              Utils.BytesToString(
-                                                  dirPlacesQueryPacket.QueryData.SimName),
-                                              dirPlacesQueryPacket.QueryData.QueryStart);
-                    }
-                    break;
-                case PacketType.DirFindQuery:
-                    DirFindQueryPacket dirFindQueryPacket = (DirFindQueryPacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (dirFindQueryPacket.AgentData.SessionID != SessionId ||
-                            dirFindQueryPacket.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    handlerDirFindQuery = OnDirFindQuery;
-                    if (handlerDirFindQuery != null)
-                    {
-                        handlerDirFindQuery(this,
-                                            dirFindQueryPacket.QueryData.QueryID,
-                                            Utils.BytesToString(
-                                                dirFindQueryPacket.QueryData.QueryText),
-                                            dirFindQueryPacket.QueryData.QueryFlags,
-                                            dirFindQueryPacket.QueryData.QueryStart);
-                    }
-                    break;
-                case PacketType.DirLandQuery:
-                    DirLandQueryPacket dirLandQueryPacket = (DirLandQueryPacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (dirLandQueryPacket.AgentData.SessionID != SessionId ||
-                            dirLandQueryPacket.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    handlerDirLandQuery = OnDirLandQuery;
-                    if (handlerDirLandQuery != null)
-                    {
-                        handlerDirLandQuery(this,
-                                            dirLandQueryPacket.QueryData.QueryID,
-                                            dirLandQueryPacket.QueryData.QueryFlags,
-                                            dirLandQueryPacket.QueryData.SearchType,
-                                            dirLandQueryPacket.QueryData.Price,
-                                            dirLandQueryPacket.QueryData.Area,
-                                            dirLandQueryPacket.QueryData.QueryStart);
-                    }
-                    break;
-                case PacketType.DirPopularQuery:
-                    DirPopularQueryPacket dirPopularQueryPacket = (DirPopularQueryPacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (dirPopularQueryPacket.AgentData.SessionID != SessionId ||
-                            dirPopularQueryPacket.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    handlerDirPopularQuery = OnDirPopularQuery;
-                    if (handlerDirPopularQuery != null)
-                    {
-                        handlerDirPopularQuery(this,
-                                               dirPopularQueryPacket.QueryData.QueryID,
-                                               dirPopularQueryPacket.QueryData.QueryFlags);
-                    }
-                    break;
-                case PacketType.DirClassifiedQuery:
-                    DirClassifiedQueryPacket dirClassifiedQueryPacket = (DirClassifiedQueryPacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (dirClassifiedQueryPacket.AgentData.SessionID != SessionId ||
-                            dirClassifiedQueryPacket.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    handlerDirClassifiedQuery = OnDirClassifiedQuery;
-                    if (handlerDirClassifiedQuery != null)
-                    {
-                        handlerDirClassifiedQuery(this,
-                                                  dirClassifiedQueryPacket.QueryData.QueryID,
-                                                  Utils.BytesToString(
-                                                      dirClassifiedQueryPacket.QueryData.QueryText),
-                                                  dirClassifiedQueryPacket.QueryData.QueryFlags,
-                                                  dirClassifiedQueryPacket.QueryData.Category,
-                                                  dirClassifiedQueryPacket.QueryData.QueryStart);
-                    }
-                    break;
-                case PacketType.EventInfoRequest:
-                    EventInfoRequestPacket eventInfoRequestPacket = (EventInfoRequestPacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (eventInfoRequestPacket.AgentData.SessionID != SessionId ||
-                            eventInfoRequestPacket.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    if (OnEventInfoRequest != null)
-                    {
-                        OnEventInfoRequest(this, eventInfoRequestPacket.EventData.EventID);
-                    }
-                    break;
-
-                #region Calling Card
-
-                case PacketType.OfferCallingCard:
-                    OfferCallingCardPacket offerCallingCardPacket = (OfferCallingCardPacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (offerCallingCardPacket.AgentData.SessionID != SessionId ||
-                            offerCallingCardPacket.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    if (OnOfferCallingCard != null)
-                    {
-                        OnOfferCallingCard(this,
-                                           offerCallingCardPacket.AgentBlock.DestID,
-                                           offerCallingCardPacket.AgentBlock.TransactionID);
-                    }
-                    break;
-
-                case PacketType.AcceptCallingCard:
-                    AcceptCallingCardPacket acceptCallingCardPacket = (AcceptCallingCardPacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (acceptCallingCardPacket.AgentData.SessionID != SessionId ||
-                            acceptCallingCardPacket.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    // according to http://wiki.secondlife.com/wiki/AcceptCallingCard FolderData should
-                    // contain exactly one entry
-                    if (OnAcceptCallingCard != null && acceptCallingCardPacket.FolderData.Length > 0)
-                    {
-                        OnAcceptCallingCard(this,
-                                            acceptCallingCardPacket.TransactionBlock.TransactionID,
-                                            acceptCallingCardPacket.FolderData[0].FolderID);
-                    }
-                    break;
-
-                case PacketType.DeclineCallingCard:
-                    DeclineCallingCardPacket declineCallingCardPacket = (DeclineCallingCardPacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (declineCallingCardPacket.AgentData.SessionID != SessionId ||
-                            declineCallingCardPacket.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    if (OnDeclineCallingCard != null)
-                    {
-                        OnDeclineCallingCard(this,
-                                             declineCallingCardPacket.TransactionBlock.TransactionID);
-                    }
-                    break;
-                #endregion
-
-                #region Groups
-                case PacketType.ActivateGroup:
-                    ActivateGroupPacket activateGroupPacket = (ActivateGroupPacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (activateGroupPacket.AgentData.SessionID != SessionId ||
-                            activateGroupPacket.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    if (m_GroupsModule != null)
-                    {
-                        m_GroupsModule.ActivateGroup(this, activateGroupPacket.AgentData.GroupID);
-                        m_GroupsModule.SendAgentGroupDataUpdate(this);
-                    }
-                    break;
-
-                case PacketType.GroupTitlesRequest:
-                    GroupTitlesRequestPacket groupTitlesRequest =
-                        (GroupTitlesRequestPacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (groupTitlesRequest.AgentData.SessionID != SessionId ||
-                            groupTitlesRequest.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    if (m_GroupsModule != null)
-                    {
-                        GroupTitlesReplyPacket groupTitlesReply = (GroupTitlesReplyPacket)PacketPool.Instance.GetPacket(PacketType.GroupTitlesReply);
-
-                        groupTitlesReply.AgentData =
-                            new GroupTitlesReplyPacket.AgentDataBlock();
-
-                        groupTitlesReply.AgentData.AgentID = AgentId;
-                        groupTitlesReply.AgentData.GroupID =
-                            groupTitlesRequest.AgentData.GroupID;
-
-                        groupTitlesReply.AgentData.RequestID =
-                            groupTitlesRequest.AgentData.RequestID;
-
-                        List<GroupTitlesData> titles =
-                            m_GroupsModule.GroupTitlesRequest(this,
-                                                              groupTitlesRequest.AgentData.GroupID);
-
-                        groupTitlesReply.GroupData =
-                            new GroupTitlesReplyPacket.GroupDataBlock[titles.Count];
-
-                        int i = 0;
-                        foreach (GroupTitlesData d in titles)
-                        {
-                            groupTitlesReply.GroupData[i] =
-                                new GroupTitlesReplyPacket.GroupDataBlock();
-
-                            groupTitlesReply.GroupData[i].Title =
-                                Utils.StringToBytes(d.Name);
-                            groupTitlesReply.GroupData[i].RoleID =
-                                d.UUID;
-                            groupTitlesReply.GroupData[i].Selected =
-                                d.Selected;
-                            i++;
-                        }
-
-                        OutPacket(groupTitlesReply, ThrottleOutPacketType.Task);
-                    }
-                    break;
-
-                case PacketType.GroupProfileRequest:
-                    GroupProfileRequestPacket groupProfileRequest =
-                        (GroupProfileRequestPacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (groupProfileRequest.AgentData.SessionID != SessionId ||
-                            groupProfileRequest.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    if (m_GroupsModule != null)
-                    {
-                        GroupProfileReplyPacket groupProfileReply = (GroupProfileReplyPacket)PacketPool.Instance.GetPacket(PacketType.GroupProfileReply);
-
-                        groupProfileReply.AgentData = new GroupProfileReplyPacket.AgentDataBlock();
-                        groupProfileReply.GroupData = new GroupProfileReplyPacket.GroupDataBlock();
-                        groupProfileReply.AgentData.AgentID = AgentId;
-
-                        GroupProfileData d = m_GroupsModule.GroupProfileRequest(this,
-                                                                                groupProfileRequest.GroupData.GroupID);
-
-                        groupProfileReply.GroupData.GroupID = d.GroupID;
-                        groupProfileReply.GroupData.Name = Utils.StringToBytes(d.Name);
-                        groupProfileReply.GroupData.Charter = Utils.StringToBytes(d.Charter);
-                        groupProfileReply.GroupData.ShowInList = d.ShowInList;
-                        groupProfileReply.GroupData.MemberTitle = Utils.StringToBytes(d.MemberTitle);
-                        groupProfileReply.GroupData.PowersMask = d.PowersMask;
-                        groupProfileReply.GroupData.InsigniaID = d.InsigniaID;
-                        groupProfileReply.GroupData.FounderID = d.FounderID;
-                        groupProfileReply.GroupData.MembershipFee = d.MembershipFee;
-                        groupProfileReply.GroupData.OpenEnrollment = d.OpenEnrollment;
-                        groupProfileReply.GroupData.Money = d.Money;
-                        groupProfileReply.GroupData.GroupMembershipCount = d.GroupMembershipCount;
-                        groupProfileReply.GroupData.GroupRolesCount = d.GroupRolesCount;
-                        groupProfileReply.GroupData.AllowPublish = d.AllowPublish;
-                        groupProfileReply.GroupData.MaturePublish = d.MaturePublish;
-                        groupProfileReply.GroupData.OwnerRole = d.OwnerRole;
-
-                        OutPacket(groupProfileReply, ThrottleOutPacketType.Task);
-                    }
-                    break;
-
-                case PacketType.GroupMembersRequest:
-                    GroupMembersRequestPacket groupMembersRequestPacket =
-                        (GroupMembersRequestPacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (groupMembersRequestPacket.AgentData.SessionID != SessionId ||
-                            groupMembersRequestPacket.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    if (m_GroupsModule != null)
-                    {
-                        List<GroupMembersData> members =
-                            m_GroupsModule.GroupMembersRequest(this, groupMembersRequestPacket.GroupData.GroupID);
-
-                        int memberCount = members.Count;
-
-                        while (true)
-                        {
-                            int blockCount = members.Count;
-                            if (blockCount > 40)
-                                blockCount = 40;
-
-                            GroupMembersReplyPacket groupMembersReply = (GroupMembersReplyPacket)PacketPool.Instance.GetPacket(PacketType.GroupMembersReply);
-
-                            groupMembersReply.AgentData =
-                                new GroupMembersReplyPacket.AgentDataBlock();
-                            groupMembersReply.GroupData =
-                                new GroupMembersReplyPacket.GroupDataBlock();
-                            groupMembersReply.MemberData =
-                                new GroupMembersReplyPacket.MemberDataBlock[
-                                    blockCount];
-
-                            groupMembersReply.AgentData.AgentID = AgentId;
-                            groupMembersReply.GroupData.GroupID =
-                                groupMembersRequestPacket.GroupData.GroupID;
-                            groupMembersReply.GroupData.RequestID =
-                                groupMembersRequestPacket.GroupData.RequestID;
-                            groupMembersReply.GroupData.MemberCount = memberCount;
-
-                            for (int i = 0 ; i < blockCount ; i++)
-                            {
-                                GroupMembersData m = members[0];
-                                members.RemoveAt(0);
-
-                                groupMembersReply.MemberData[i] =
-                                    new GroupMembersReplyPacket.MemberDataBlock();
-                                groupMembersReply.MemberData[i].AgentID =
-                                    m.AgentID;
-                                groupMembersReply.MemberData[i].Contribution =
-                                    m.Contribution;
-                                groupMembersReply.MemberData[i].OnlineStatus =
-                                    Utils.StringToBytes(m.OnlineStatus);
-                                groupMembersReply.MemberData[i].AgentPowers =
-                                    m.AgentPowers;
-                                groupMembersReply.MemberData[i].Title =
-                                    Utils.StringToBytes(m.Title);
-                                groupMembersReply.MemberData[i].IsOwner =
-                                    m.IsOwner;
-                            }
-                            OutPacket(groupMembersReply, ThrottleOutPacketType.Task);
-                            if (members.Count == 0)
-                                break;
-                        }
-                    }
-                    break;
-
-                case PacketType.GroupRoleDataRequest:
-                    GroupRoleDataRequestPacket groupRolesRequest =
-                        (GroupRoleDataRequestPacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (groupRolesRequest.AgentData.SessionID != SessionId ||
-                            groupRolesRequest.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    if (m_GroupsModule != null)
-                    {
-                        GroupRoleDataReplyPacket groupRolesReply = (GroupRoleDataReplyPacket)PacketPool.Instance.GetPacket(PacketType.GroupRoleDataReply);
-
-                        groupRolesReply.AgentData =
-                            new GroupRoleDataReplyPacket.AgentDataBlock();
-
-                        groupRolesReply.AgentData.AgentID = AgentId;
-
-                        groupRolesReply.GroupData =
-                            new GroupRoleDataReplyPacket.GroupDataBlock();
-
-                        groupRolesReply.GroupData.GroupID =
-                            groupRolesRequest.GroupData.GroupID;
-
-                        groupRolesReply.GroupData.RequestID =
-                            groupRolesRequest.GroupData.RequestID;
-
-                        List<GroupRolesData> titles =
-                            m_GroupsModule.GroupRoleDataRequest(this,
-                                                                groupRolesRequest.GroupData.GroupID);
-
-                        groupRolesReply.GroupData.RoleCount =
-                            titles.Count;
-
-                        groupRolesReply.RoleData =
-                            new GroupRoleDataReplyPacket.RoleDataBlock[titles.Count];
-
-                        int i = 0;
-                        foreach (GroupRolesData d in titles)
-                        {
-                            groupRolesReply.RoleData[i] =
-                                new GroupRoleDataReplyPacket.RoleDataBlock();
-
-                            groupRolesReply.RoleData[i].RoleID =
-                                d.RoleID;
-                            groupRolesReply.RoleData[i].Name =
-                                Utils.StringToBytes(d.Name);
-                            groupRolesReply.RoleData[i].Title =
-                                Utils.StringToBytes(d.Title);
-                            groupRolesReply.RoleData[i].Description =
-                                Utils.StringToBytes(d.Description);
-                            groupRolesReply.RoleData[i].Powers =
-                                d.Powers;
-                            groupRolesReply.RoleData[i].Members =
-                                (uint)d.Members;
-
-                            i++;
-                        }
-
-                        OutPacket(groupRolesReply, ThrottleOutPacketType.Task);
-                    }
-                    break;
-
-                case PacketType.GroupRoleMembersRequest:
-                    GroupRoleMembersRequestPacket groupRoleMembersRequest =
-                        (GroupRoleMembersRequestPacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (groupRoleMembersRequest.AgentData.SessionID != SessionId ||
-                            groupRoleMembersRequest.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    if (m_GroupsModule != null)
-                    {
-                        List<GroupRoleMembersData> mappings =
-                                m_GroupsModule.GroupRoleMembersRequest(this,
-                                groupRoleMembersRequest.GroupData.GroupID);
-
-                        int mappingsCount = mappings.Count;
-
-                        while (mappings.Count > 0)
-                        {
-                            int pairs = mappings.Count;
-                            if (pairs > 32)
-                                pairs = 32;
-
-                            GroupRoleMembersReplyPacket groupRoleMembersReply = (GroupRoleMembersReplyPacket)PacketPool.Instance.GetPacket(PacketType.GroupRoleMembersReply);
-                            groupRoleMembersReply.AgentData =
-                                    new GroupRoleMembersReplyPacket.AgentDataBlock();
-                            groupRoleMembersReply.AgentData.AgentID =
-                                    AgentId;
-                            groupRoleMembersReply.AgentData.GroupID =
-                                    groupRoleMembersRequest.GroupData.GroupID;
-                            groupRoleMembersReply.AgentData.RequestID =
-                                    groupRoleMembersRequest.GroupData.RequestID;
-
-                            groupRoleMembersReply.AgentData.TotalPairs =
-                                    (uint)mappingsCount;
-
-                            groupRoleMembersReply.MemberData =
-                                    new GroupRoleMembersReplyPacket.MemberDataBlock[pairs];
-
-                            for (int i = 0 ; i < pairs ; i++)
-                            {
-                                GroupRoleMembersData d = mappings[0];
-                                mappings.RemoveAt(0);
-
-                                groupRoleMembersReply.MemberData[i] =
-                                    new GroupRoleMembersReplyPacket.MemberDataBlock();
-
-                                groupRoleMembersReply.MemberData[i].RoleID =
-                                        d.RoleID;
-                                groupRoleMembersReply.MemberData[i].MemberID =
-                                        d.MemberID;
-                            }
-
-                            OutPacket(groupRoleMembersReply, ThrottleOutPacketType.Task);
-                        }
-                    }
-                    break;
-
-                case PacketType.CreateGroupRequest:
-                    CreateGroupRequestPacket createGroupRequest =
-                        (CreateGroupRequestPacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (createGroupRequest.AgentData.SessionID != SessionId ||
-                            createGroupRequest.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    if (m_GroupsModule != null)
-                    {
-                        m_GroupsModule.CreateGroup(this,
-                                                   Utils.BytesToString(createGroupRequest.GroupData.Name),
-                                                   Utils.BytesToString(createGroupRequest.GroupData.Charter),
-                                                   createGroupRequest.GroupData.ShowInList,
-                                                   createGroupRequest.GroupData.InsigniaID,
-                                                   createGroupRequest.GroupData.MembershipFee,
-                                                   createGroupRequest.GroupData.OpenEnrollment,
-                                                   createGroupRequest.GroupData.AllowPublish,
-                                                   createGroupRequest.GroupData.MaturePublish);
-                    }
-                    break;
-
-                case PacketType.UpdateGroupInfo:
-                    UpdateGroupInfoPacket updateGroupInfo =
-                        (UpdateGroupInfoPacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (updateGroupInfo.AgentData.SessionID != SessionId ||
-                            updateGroupInfo.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    if (m_GroupsModule != null)
-                    {
-                        m_GroupsModule.UpdateGroupInfo(this,
-                                                       updateGroupInfo.GroupData.GroupID,
-                                                       Utils.BytesToString(updateGroupInfo.GroupData.Charter),
-                                                       updateGroupInfo.GroupData.ShowInList,
-                                                       updateGroupInfo.GroupData.InsigniaID,
-                                                       updateGroupInfo.GroupData.MembershipFee,
-                                                       updateGroupInfo.GroupData.OpenEnrollment,
-                                                       updateGroupInfo.GroupData.AllowPublish,
-                                                       updateGroupInfo.GroupData.MaturePublish);
-                    }
-
-                    break;
-
-                case PacketType.SetGroupAcceptNotices:
-                    SetGroupAcceptNoticesPacket setGroupAcceptNotices =
-                        (SetGroupAcceptNoticesPacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (setGroupAcceptNotices.AgentData.SessionID != SessionId ||
-                            setGroupAcceptNotices.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    if (m_GroupsModule != null)
-                    {
-                        m_GroupsModule.SetGroupAcceptNotices(this,
-                                                             setGroupAcceptNotices.Data.GroupID,
-                                                             setGroupAcceptNotices.Data.AcceptNotices,
-                                                             setGroupAcceptNotices.NewData.ListInProfile);
-                    }
-
-                    break;
-
-                case PacketType.GroupTitleUpdate:
-                    GroupTitleUpdatePacket groupTitleUpdate =
-                        (GroupTitleUpdatePacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (groupTitleUpdate.AgentData.SessionID != SessionId ||
-                            groupTitleUpdate.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    if (m_GroupsModule != null)
-                    {
-                        m_GroupsModule.GroupTitleUpdate(this,
-                                                        groupTitleUpdate.AgentData.GroupID,
-                                                        groupTitleUpdate.AgentData.TitleRoleID);
-                    }
-
-                    break;
-
-
-                case PacketType.ParcelDeedToGroup:
-                    ParcelDeedToGroupPacket parcelDeedToGroup = (ParcelDeedToGroupPacket)Pack;
-                    if (m_GroupsModule != null)
-                    {
-                        handlerParcelDeedToGroup = OnParcelDeedToGroup;
-                        if (handlerParcelDeedToGroup != null)
-                        {
-                            handlerParcelDeedToGroup(parcelDeedToGroup.Data.LocalID, parcelDeedToGroup.Data.GroupID,this);
-
-                        }
-                    }
-
-                    break;
-
-
-                case PacketType.GroupNoticesListRequest:
-                    GroupNoticesListRequestPacket groupNoticesListRequest =
-                        (GroupNoticesListRequestPacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (groupNoticesListRequest.AgentData.SessionID != SessionId ||
-                            groupNoticesListRequest.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    if (m_GroupsModule != null)
-                    {
-                        GroupNoticeData[] gn =
-                            m_GroupsModule.GroupNoticesListRequest(this,
-                                                                   groupNoticesListRequest.Data.GroupID);
-
-                        GroupNoticesListReplyPacket groupNoticesListReply = (GroupNoticesListReplyPacket)PacketPool.Instance.GetPacket(PacketType.GroupNoticesListReply);
-                        groupNoticesListReply.AgentData =
-                            new GroupNoticesListReplyPacket.AgentDataBlock();
-                        groupNoticesListReply.AgentData.AgentID = AgentId;
-                        groupNoticesListReply.AgentData.GroupID = groupNoticesListRequest.Data.GroupID;
-
-                        groupNoticesListReply.Data = new GroupNoticesListReplyPacket.DataBlock[gn.Length];
-
-                        int i = 0;
-                        foreach (GroupNoticeData g in gn)
-                        {
-                            groupNoticesListReply.Data[i] = new GroupNoticesListReplyPacket.DataBlock();
-                            groupNoticesListReply.Data[i].NoticeID =
-                                g.NoticeID;
-                            groupNoticesListReply.Data[i].Timestamp =
-                                g.Timestamp;
-                            groupNoticesListReply.Data[i].FromName =
-                                Utils.StringToBytes(g.FromName);
-                            groupNoticesListReply.Data[i].Subject =
-                                Utils.StringToBytes(g.Subject);
-                            groupNoticesListReply.Data[i].HasAttachment =
-                                g.HasAttachment;
-                            groupNoticesListReply.Data[i].AssetType =
-                                g.AssetType;
-                            i++;
-                        }
-
-                        OutPacket(groupNoticesListReply, ThrottleOutPacketType.Task);
-                    }
-
-                    break;
-                case PacketType.GroupNoticeRequest:
-                    GroupNoticeRequestPacket groupNoticeRequest =
-                        (GroupNoticeRequestPacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (groupNoticeRequest.AgentData.SessionID != SessionId ||
-                            groupNoticeRequest.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    if (m_GroupsModule != null)
-                    {
-                        m_GroupsModule.GroupNoticeRequest(this,
-                                                          groupNoticeRequest.Data.GroupNoticeID);
-                    }
-                    break;
-
-                case PacketType.GroupRoleUpdate:
-                    GroupRoleUpdatePacket groupRoleUpdate =
-                        (GroupRoleUpdatePacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (groupRoleUpdate.AgentData.SessionID != SessionId ||
-                            groupRoleUpdate.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    if (m_GroupsModule != null)
-                    {
-                        foreach (GroupRoleUpdatePacket.RoleDataBlock d in
-                            groupRoleUpdate.RoleData)
-                        {
-                            m_GroupsModule.GroupRoleUpdate(this,
-                                                           groupRoleUpdate.AgentData.GroupID,
-                                                           d.RoleID,
-                                                           Utils.BytesToString(d.Name),
-                                                           Utils.BytesToString(d.Description),
-                                                           Utils.BytesToString(d.Title),
-                                                           d.Powers,
-                                                           d.UpdateType);
-                        }
-                        m_GroupsModule.NotifyChange(groupRoleUpdate.AgentData.GroupID);
-                    }
-                    break;
-
-                case PacketType.GroupRoleChanges:
-                    GroupRoleChangesPacket groupRoleChanges =
-                        (GroupRoleChangesPacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (groupRoleChanges.AgentData.SessionID != SessionId ||
-                            groupRoleChanges.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    if (m_GroupsModule != null)
-                    {
-                        foreach (GroupRoleChangesPacket.RoleChangeBlock d in
-                            groupRoleChanges.RoleChange)
-                        {
-                            m_GroupsModule.GroupRoleChanges(this,
-                                                            groupRoleChanges.AgentData.GroupID,
-                                                            d.RoleID,
-                                                            d.MemberID,
-                                                            d.Change);
-                        }
-                        m_GroupsModule.NotifyChange(groupRoleChanges.AgentData.GroupID);
-                    }
-                    break;
-
-                case PacketType.JoinGroupRequest:
-                    JoinGroupRequestPacket joinGroupRequest =
-                        (JoinGroupRequestPacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (joinGroupRequest.AgentData.SessionID != SessionId ||
-                            joinGroupRequest.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    if (m_GroupsModule != null)
-                    {
-                        m_GroupsModule.JoinGroupRequest(this,
-                                joinGroupRequest.GroupData.GroupID);
-                    }
-                    break;
-
-                case PacketType.LeaveGroupRequest:
-                    LeaveGroupRequestPacket leaveGroupRequest =
-                        (LeaveGroupRequestPacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (leaveGroupRequest.AgentData.SessionID != SessionId ||
-                            leaveGroupRequest.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    if (m_GroupsModule != null)
-                    {
-                        m_GroupsModule.LeaveGroupRequest(this,
-                                leaveGroupRequest.GroupData.GroupID);
-                    }
-                    break;
-
-                case PacketType.EjectGroupMemberRequest:
-                    EjectGroupMemberRequestPacket ejectGroupMemberRequest =
-                        (EjectGroupMemberRequestPacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (ejectGroupMemberRequest.AgentData.SessionID != SessionId ||
-                            ejectGroupMemberRequest.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    if (m_GroupsModule != null)
-                    {
-                        foreach (EjectGroupMemberRequestPacket.EjectDataBlock e
-                                in ejectGroupMemberRequest.EjectData)
-                        {
-                            m_GroupsModule.EjectGroupMemberRequest(this,
-                                    ejectGroupMemberRequest.GroupData.GroupID,
-                                    e.EjecteeID);
-                        }
-                    }
-                    break;
-
-                case PacketType.InviteGroupRequest:
-                    InviteGroupRequestPacket inviteGroupRequest =
-                        (InviteGroupRequestPacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (inviteGroupRequest.AgentData.SessionID != SessionId ||
-                            inviteGroupRequest.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    if (m_GroupsModule != null)
-                    {
-                        foreach (InviteGroupRequestPacket.InviteDataBlock b in
-                                inviteGroupRequest.InviteData)
-                        {
-                            m_GroupsModule.InviteGroupRequest(this,
-                                    inviteGroupRequest.GroupData.GroupID,
-                                    b.InviteeID,
-                                    b.RoleID);
-                        }
-                    }
-                    break;
-
-                #endregion
-                case PacketType.StartLure:
-                    StartLurePacket startLureRequest = (StartLurePacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (startLureRequest.AgentData.SessionID != SessionId ||
-                            startLureRequest.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    handlerStartLure = OnStartLure;
-                    if (handlerStartLure != null)
-                        handlerStartLure(startLureRequest.Info.LureType,
-                                         Utils.BytesToString(
-                                            startLureRequest.Info.Message),
-                                         startLureRequest.TargetData[0].TargetID,
-                                         this);
-                    break;
-
-                case PacketType.TeleportLureRequest:
-                    TeleportLureRequestPacket teleportLureRequest =
-                            (TeleportLureRequestPacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (teleportLureRequest.Info.SessionID != SessionId ||
-                            teleportLureRequest.Info.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    handlerTeleportLureRequest = OnTeleportLureRequest;
-                    if (handlerTeleportLureRequest != null)
-                        handlerTeleportLureRequest(
-                                 teleportLureRequest.Info.LureID,
-                                 teleportLureRequest.Info.TeleportFlags,
-                                 this);
-                    break;
-
-                case PacketType.ClassifiedInfoRequest:
-                    ClassifiedInfoRequestPacket classifiedInfoRequest =
-                            (ClassifiedInfoRequestPacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (classifiedInfoRequest.AgentData.SessionID != SessionId ||
-                            classifiedInfoRequest.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    handlerClassifiedInfoRequest = OnClassifiedInfoRequest;
-                    if (handlerClassifiedInfoRequest != null)
-                        handlerClassifiedInfoRequest(
-                                 classifiedInfoRequest.Data.ClassifiedID,
-                                 this);
-                    break;
-
-                case PacketType.ClassifiedInfoUpdate:
-                    ClassifiedInfoUpdatePacket classifiedInfoUpdate =
-                            (ClassifiedInfoUpdatePacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (classifiedInfoUpdate.AgentData.SessionID != SessionId ||
-                            classifiedInfoUpdate.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    handlerClassifiedInfoUpdate = OnClassifiedInfoUpdate;
-                    if (handlerClassifiedInfoUpdate != null)
-                        handlerClassifiedInfoUpdate(
-                                classifiedInfoUpdate.Data.ClassifiedID,
-                                classifiedInfoUpdate.Data.Category,
-                                Utils.BytesToString(
-                                        classifiedInfoUpdate.Data.Name),
-                                Utils.BytesToString(
-                                        classifiedInfoUpdate.Data.Desc),
-                                classifiedInfoUpdate.Data.ParcelID,
-                                classifiedInfoUpdate.Data.ParentEstate,
-                                classifiedInfoUpdate.Data.SnapshotID,
-                                new Vector3(
-                                    classifiedInfoUpdate.Data.PosGlobal),
-                                classifiedInfoUpdate.Data.ClassifiedFlags,
-                                classifiedInfoUpdate.Data.PriceForListing,
-                                this);
-                    break;
-
-                case PacketType.ClassifiedDelete:
-                    ClassifiedDeletePacket classifiedDelete =
-                            (ClassifiedDeletePacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (classifiedDelete.AgentData.SessionID != SessionId ||
-                            classifiedDelete.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    handlerClassifiedDelete = OnClassifiedDelete;
-                    if (handlerClassifiedDelete != null)
-                        handlerClassifiedDelete(
-                                 classifiedDelete.Data.ClassifiedID,
-                                 this);
-                    break;
-
-                case PacketType.ClassifiedGodDelete:
-                    ClassifiedGodDeletePacket classifiedGodDelete =
-                            (ClassifiedGodDeletePacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (classifiedGodDelete.AgentData.SessionID != SessionId ||
-                            classifiedGodDelete.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    handlerClassifiedGodDelete = OnClassifiedGodDelete;
-                    if (handlerClassifiedGodDelete != null)
-                        handlerClassifiedGodDelete(
-                                 classifiedGodDelete.Data.ClassifiedID,
-                                 this);
-                    break;
-
-                case PacketType.EventGodDelete:
-                    EventGodDeletePacket eventGodDelete =
-                            (EventGodDeletePacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (eventGodDelete.AgentData.SessionID != SessionId ||
-                            eventGodDelete.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    handlerEventGodDelete = OnEventGodDelete;
-                    if (handlerEventGodDelete != null)
-                        handlerEventGodDelete(
-                                eventGodDelete.EventData.EventID,
-                                eventGodDelete.QueryData.QueryID,
-                                Utils.BytesToString(
-                                        eventGodDelete.QueryData.QueryText),
-                                eventGodDelete.QueryData.QueryFlags,
-                                eventGodDelete.QueryData.QueryStart,
-                                this);
-                    break;
-
-                case PacketType.EventNotificationAddRequest:
-                    EventNotificationAddRequestPacket eventNotificationAdd =
-                            (EventNotificationAddRequestPacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (eventNotificationAdd.AgentData.SessionID != SessionId ||
-                            eventNotificationAdd.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    handlerEventNotificationAddRequest = OnEventNotificationAddRequest;
-                    if (handlerEventNotificationAddRequest != null)
-                        handlerEventNotificationAddRequest(
-                                eventNotificationAdd.EventData.EventID, this);
-                    break;
-
-                case PacketType.EventNotificationRemoveRequest:
-                    EventNotificationRemoveRequestPacket eventNotificationRemove =
-                            (EventNotificationRemoveRequestPacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (eventNotificationRemove.AgentData.SessionID != SessionId ||
-                            eventNotificationRemove.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    handlerEventNotificationRemoveRequest = OnEventNotificationRemoveRequest;
-                    if (handlerEventNotificationRemoveRequest != null)
-                        handlerEventNotificationRemoveRequest(
-                                eventNotificationRemove.EventData.EventID, this);
-                    break;
-
-                case PacketType.RetrieveInstantMessages:
-                    RetrieveInstantMessagesPacket rimpInstantMessagePack = (RetrieveInstantMessagesPacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (rimpInstantMessagePack.AgentData.SessionID != SessionId ||
-                            rimpInstantMessagePack.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    handlerRetrieveInstantMessages = OnRetrieveInstantMessages;
-                    if (handlerRetrieveInstantMessages != null)
-                        handlerRetrieveInstantMessages(this);
-                    break;
-
-                case PacketType.PickDelete:
-                    PickDeletePacket pickDelete =
-                            (PickDeletePacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (pickDelete.AgentData.SessionID != SessionId ||
-                            pickDelete.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    handlerPickDelete = OnPickDelete;
-                    if (handlerPickDelete != null)
-                        handlerPickDelete(this, pickDelete.Data.PickID); 
-                    break;
-                case PacketType.PickGodDelete:
-                    PickGodDeletePacket pickGodDelete =
-                            (PickGodDeletePacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (pickGodDelete.AgentData.SessionID != SessionId ||
-                            pickGodDelete.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    handlerPickGodDelete = OnPickGodDelete;
-                    if (handlerPickGodDelete != null)
-                        handlerPickGodDelete(this,
-                                pickGodDelete.AgentData.AgentID,
-                                pickGodDelete.Data.PickID,
-                                pickGodDelete.Data.QueryID); 
-                    break;
-                case PacketType.PickInfoUpdate:
-                    PickInfoUpdatePacket pickInfoUpdate =
-                            (PickInfoUpdatePacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (pickInfoUpdate.AgentData.SessionID != SessionId ||
-                            pickInfoUpdate.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    handlerPickInfoUpdate = OnPickInfoUpdate;
-                    if (handlerPickInfoUpdate != null)
-                        handlerPickInfoUpdate(this,
-                                pickInfoUpdate.Data.PickID,
-                                pickInfoUpdate.Data.CreatorID,
-                                pickInfoUpdate.Data.TopPick,
-                                Utils.BytesToString(pickInfoUpdate.Data.Name),
-                                Utils.BytesToString(pickInfoUpdate.Data.Desc),
-                                pickInfoUpdate.Data.SnapshotID,
-                                pickInfoUpdate.Data.SortOrder,
-                                pickInfoUpdate.Data.Enabled);
-                    break;
-                case PacketType.AvatarNotesUpdate:
-                    AvatarNotesUpdatePacket avatarNotesUpdate =
-                            (AvatarNotesUpdatePacket)Pack;
-
-                    #region Packet Session and User Check
-                    if (m_checkPackets)
-                    {
-                        if (avatarNotesUpdate.AgentData.SessionID != SessionId ||
-                            avatarNotesUpdate.AgentData.AgentID != AgentId)
-                            break;
-                    }
-                    #endregion
-
-                    handlerAvatarNotesUpdate = OnAvatarNotesUpdate;
-                    if (handlerAvatarNotesUpdate != null)
-                        handlerAvatarNotesUpdate(this,
-                                avatarNotesUpdate.Data.TargetID,
-                                Utils.BytesToString(avatarNotesUpdate.Data.Notes));
-                    break;
-
-//                case PacketType.AvatarInterestsUpdate:
-//                    AvatarInterestsUpdatePacket avatarInterestUpdate =
-//                            (AvatarInterestsUpdatePacket)Pack;
-//
-//                    break;
-
-                case PacketType.PlacesQuery:
-                    PlacesQueryPacket placesQueryPacket =
-                            (PlacesQueryPacket)Pack;
-
-                    handlerPlacesQuery = OnPlacesQuery;
-
-                    if (handlerPlacesQuery != null)
-                        handlerPlacesQuery(placesQueryPacket.AgentData.QueryID,
-                                placesQueryPacket.TransactionData.TransactionID,
-                                Utils.BytesToString(
-                                        placesQueryPacket.QueryData.QueryText),
-                                placesQueryPacket.QueryData.QueryFlags,
-                                (byte)placesQueryPacket.QueryData.Category,
-                                Utils.BytesToString(
-                                        placesQueryPacket.QueryData.SimName),
-                                this);
-                    break;
-                default:
-                    m_log.Warn("[CLIENT]: unhandled packet " + Pack);
-                    break;
-
-                    #endregion
-            }
-
-            PacketPool.Instance.ReturnPacket(Pack);
-
-        }
-
-        private static PrimitiveBaseShape GetShapeFromAddPacket(ObjectAddPacket addPacket)
-        {
-            PrimitiveBaseShape shape = new PrimitiveBaseShape();
-
-            shape.PCode = addPacket.ObjectData.PCode;
-            shape.State = addPacket.ObjectData.State;
-            shape.PathBegin = addPacket.ObjectData.PathBegin;
-            shape.PathEnd = addPacket.ObjectData.PathEnd;
-            shape.PathScaleX = addPacket.ObjectData.PathScaleX;
-            shape.PathScaleY = addPacket.ObjectData.PathScaleY;
-            shape.PathShearX = addPacket.ObjectData.PathShearX;
-            shape.PathShearY = addPacket.ObjectData.PathShearY;
-            shape.PathSkew = addPacket.ObjectData.PathSkew;
-            shape.ProfileBegin = addPacket.ObjectData.ProfileBegin;
-            shape.ProfileEnd = addPacket.ObjectData.ProfileEnd;
-            shape.Scale = addPacket.ObjectData.Scale;
-            shape.PathCurve = addPacket.ObjectData.PathCurve;
-            shape.ProfileCurve = addPacket.ObjectData.ProfileCurve;
-            shape.ProfileHollow = addPacket.ObjectData.ProfileHollow;
-            shape.PathRadiusOffset = addPacket.ObjectData.PathRadiusOffset;
-            shape.PathRevolutions = addPacket.ObjectData.PathRevolutions;
-            shape.PathTaperX = addPacket.ObjectData.PathTaperX;
-            shape.PathTaperY = addPacket.ObjectData.PathTaperY;
-            shape.PathTwist = addPacket.ObjectData.PathTwist;
-            shape.PathTwistBegin = addPacket.ObjectData.PathTwistBegin;
-            Primitive.TextureEntry ntex = new Primitive.TextureEntry(new UUID("89556747-24cb-43ed-920b-47caed15465f"));
-            shape.TextureEntry = ntex.GetBytes();
-            //shape.Textures = ntex;
-            return shape;
         }
 
         /// <summary>
@@ -9870,10 +2261,10 @@ namespace OpenSim.Region.ClientStack.LindenUDP
                 Group.Contribution = GroupMembership[i].Contribution;
                 Group.GroupID = GroupMembership[i].GroupID;
                 Group.GroupInsigniaID = GroupMembership[i].GroupPicture;
-                Group.GroupName = Utils.StringToBytes(GroupMembership[i].GroupName);
+                Group.GroupName = Util.StringToBytes256(GroupMembership[i].GroupName);
                 Group.GroupPowers = GroupMembership[i].GroupPowers;
                 Groups[i] = Group;
-                
+
 
             }
             Groupupdate.GroupData = Groups;
@@ -9904,7 +2295,7 @@ namespace OpenSim.Region.ClientStack.LindenUDP
             UUIDGroupNameReplyPacket.UUIDNameBlockBlock[] uidnameblock = new UUIDGroupNameReplyPacket.UUIDNameBlockBlock[1];
             UUIDGroupNameReplyPacket.UUIDNameBlockBlock uidnamebloc = new UUIDGroupNameReplyPacket.UUIDNameBlockBlock();
             uidnamebloc.ID = groupLLUID;
-            uidnamebloc.GroupName = Utils.StringToBytes(GroupName);
+            uidnamebloc.GroupName = Util.StringToBytes256(GroupName);
             uidnameblock[0] = uidnamebloc;
             pack.UUIDNameBlock = uidnameblock;
             OutPacket(pack, ThrottleOutPacketType.Task);
@@ -9929,8 +2320,8 @@ namespace OpenSim.Region.ClientStack.LindenUDP
                 lsrepdb.Score = lsrpia[i].Score;
                 lsrepdb.TaskID = lsrpia[i].TaskID;
                 lsrepdb.TaskLocalID = lsrpia[i].TaskLocalID;
-                lsrepdb.TaskName = Utils.StringToBytes(lsrpia[i].TaskName);
-                lsrepdb.OwnerName = Utils.StringToBytes(lsrpia[i].OwnerName);
+                lsrepdb.TaskName = Util.StringToBytes256(lsrpia[i].TaskName);
+                lsrepdb.OwnerName = Util.StringToBytes256(lsrpia[i].OwnerName);
                 lsrepdba[i] = lsrepdb;
             }
             lsrp.ReportData = lsrepdba;
@@ -10026,90 +2417,8 @@ namespace OpenSim.Region.ClientStack.LindenUDP
 
         }
 
-        public ClientInfo GetClientInfo()
+        public void SendRegionHandle(UUID regionID, ulong handle)
         {
-            ClientInfo info = m_PacketHandler.GetClientInfo();
-
-            info.userEP = m_userEndPoint;
-            info.proxyEP = m_proxyEndPoint;
-            info.agentcircuit = new sAgentCircuitData(RequestClientInfo());
-
-            return info;
-        }
-
-        public EndPoint GetClientEP()
-        {
-            return m_userEndPoint;
-        }
-
-        public void SetClientInfo(ClientInfo info)
-        {
-            m_PacketHandler.SetClientInfo(info);
-        }
-
-        #region Media Parcel Members
-
-        public void SendParcelMediaCommand(uint flags, ParcelMediaCommandEnum command, float time)
-        {
-            ParcelMediaCommandMessagePacket commandMessagePacket = new ParcelMediaCommandMessagePacket();
-            commandMessagePacket.CommandBlock.Flags = flags;
-            commandMessagePacket.CommandBlock.Command =(uint) command;
-            commandMessagePacket.CommandBlock.Time = time;
-
-            OutPacket(commandMessagePacket, ThrottleOutPacketType.Unknown);
-        }
-
-        public void SendParcelMediaUpdate(string mediaUrl, UUID mediaTextureID,
-                                   byte autoScale, string mediaType, string mediaDesc, int mediaWidth, int mediaHeight,
-                                   byte mediaLoop)
-        {
-            ParcelMediaUpdatePacket updatePacket = new ParcelMediaUpdatePacket();
-            updatePacket.DataBlock.MediaURL = Utils.StringToBytes(mediaUrl);
-            updatePacket.DataBlock.MediaID = mediaTextureID;
-            updatePacket.DataBlock.MediaAutoScale = autoScale;
-
-            updatePacket.DataBlockExtended.MediaType = Utils.StringToBytes(mediaType);
-            updatePacket.DataBlockExtended.MediaDesc = Utils.StringToBytes(mediaDesc);
-            updatePacket.DataBlockExtended.MediaWidth = mediaWidth;
-            updatePacket.DataBlockExtended.MediaHeight = mediaHeight;
-            updatePacket.DataBlockExtended.MediaLoop = mediaLoop;
-
-            OutPacket(updatePacket, ThrottleOutPacketType.Unknown);
-        }
-
-        #endregion
-
-
-        #region Camera
-
-        public void SendSetFollowCamProperties (UUID objectID, SortedDictionary<int, float> parameters)
-        {
-            SetFollowCamPropertiesPacket packet = (SetFollowCamPropertiesPacket)PacketPool.Instance.GetPacket(PacketType.SetFollowCamProperties);
-            packet.ObjectData.ObjectID = objectID;
-            SetFollowCamPropertiesPacket.CameraPropertyBlock[] camPropBlock = new SetFollowCamPropertiesPacket.CameraPropertyBlock[parameters.Count];
-            uint idx = 0;
-            foreach (KeyValuePair<int, float> pair in parameters)
-            {
-                SetFollowCamPropertiesPacket.CameraPropertyBlock block = new SetFollowCamPropertiesPacket.CameraPropertyBlock();
-                block.Type = pair.Key;
-                block.Value = pair.Value;
-
-                camPropBlock[idx++] = block;
-            }
-            packet.CameraProperty = camPropBlock;
-            OutPacket(packet, ThrottleOutPacketType.Task);
-        }
-
-        public void SendClearFollowCamProperties (UUID objectID)
-        {
-            ClearFollowCamPropertiesPacket packet = (ClearFollowCamPropertiesPacket)PacketPool.Instance.GetPacket(PacketType.ClearFollowCamProperties);
-            packet.ObjectData.ObjectID = objectID;
-            OutPacket(packet, ThrottleOutPacketType.Task);
-        }
-
-        #endregion
-
-        public void SendRegionHandle(UUID regionID, ulong handle) {
             RegionIDAndHandleReplyPacket reply = (RegionIDAndHandleReplyPacket)PacketPool.Instance.GetPacket(PacketType.RegionIDAndHandleReply);
             reply.ReplyBlock.RegionID = regionID;
             reply.ReplyBlock.RegionHandle = handle;
@@ -10159,34 +2468,6 @@ namespace OpenSim.Region.ClientStack.LindenUDP
             packet.Data.LookAt = lookAt;
 
             OutPacket(packet, ThrottleOutPacketType.Task);
-        }
-
-        public void SetClientOption(string option, string value)
-        {
-            switch (option)
-            {
-            case "ReliableIsImportant":
-                bool val;
-
-                if (bool.TryParse(value, out val))
-                    m_PacketHandler.ReliableIsImportant = val;
-                break;
-            default:
-                break;
-            }
-        }
-
-        public string GetClientOption(string option)
-        {
-            switch (option)
-            {
-                case "ReliableIsImportant":
-                    return m_PacketHandler.ReliableIsImportant.ToString();
-
-                default:
-                    break;
-            }
-            return string.Empty;
         }
 
         public void SendDirPlacesReply(UUID queryID, DirPlacesReplyData[] data)
@@ -10588,7 +2869,7 @@ namespace OpenSim.Region.ClientStack.LindenUDP
 
             ac.Data = new AvatarClassifiedReplyPacket.DataBlock[classifiedID.Length];
             int i;
-            for (i = 0 ; i < classifiedID.Length ; i++)
+            for (i = 0; i < classifiedID.Length; i++)
             {
                 ac.Data[i].ClassifiedID = classifiedID[i];
                 ac.Data[i].Name = Utils.StringToBytes(name[i]);
@@ -10741,86 +3022,6 @@ namespace OpenSim.Region.ClientStack.LindenUDP
             OutPacket(ur, ThrottleOutPacketType.Task);
         }
 
-        public void KillEndDone()
-        {
-            KillPacket kp = new KillPacket();
-            OutPacket(kp, ThrottleOutPacketType.Task | ThrottleOutPacketType.LowPriority);
-        }
-
-        #region IClientCore
-
-        private readonly Dictionary<Type, object> m_clientInterfaces = new Dictionary<Type, object>();
-
-        /// <summary>
-        /// Register an interface on this client, should only be called in the constructor.
-        /// </summary>
-        /// <typeparam name="T"></typeparam>
-        /// <param name="iface"></param>
-        protected void RegisterInterface<T>(T iface)
-        {
-            lock (m_clientInterfaces)
-            {
-                if (!m_clientInterfaces.ContainsKey(typeof(T)))
-                {
-                    m_clientInterfaces.Add(typeof(T), iface);
-                }
-            }
-        }
-
-        protected virtual void RegisterInterfaces()
-        {
-            RegisterInterface<IClientIM>(this);
-            RegisterInterface<IClientChat>(this);
-            RegisterInterface<IClientIPEndpoint>(this);
-        }
-
-        public bool TryGet<T>(out T iface)
-        {
-            if (m_clientInterfaces.ContainsKey(typeof(T)))
-            {
-                iface = (T)m_clientInterfaces[typeof(T)];
-                return true;
-            }
-            iface = default(T);
-            return false;
-        }
-
-        public T Get<T>()
-        {
-            return (T)m_clientInterfaces[typeof(T)];
-        }
-
-        public void Disconnect(string reason)
-        {
-            Kick(reason);
-            Thread.Sleep(1000);
-            Close(true);
-        }
-
-        public void Disconnect()
-        {
-            Close(true);
-        }
-
-
-        #endregion
-
-        public void RefreshGroupMembership()
-        {
-            if (m_GroupsModule != null)
-            {
-                GroupMembershipData[] GroupMembership =
-                        m_GroupsModule.GetMembershipData(AgentId);
-
-                m_groupPowers.Clear();
-
-                for (int i = 0; i < GroupMembership.Length; i++)
-                {
-                    m_groupPowers[GroupMembership[i].GroupID] = GroupMembership[i].GroupPowers;
-                }
-            }
-        }
-
         public void SendCreateGroupReply(UUID groupID, bool success, string message)
         {
             CreateGroupReplyPacket createGroupReply = (CreateGroupReplyPacket)PacketPool.Instance.GetPacket(PacketType.CreateGroupReply);
@@ -10859,7 +3060,7 @@ namespace OpenSim.Region.ClientStack.LindenUDP
             OutPacket(muteListUpdate, ThrottleOutPacketType.Task);
         }
 
-        public void SendPickInfoReply(UUID pickID,UUID creatorID, bool topPick, UUID parcelID, string name, string desc, UUID snapshotID, string user, string originalName, string simName, Vector3 posGlobal, int sortOrder, bool enabled)
+        public void SendPickInfoReply(UUID pickID, UUID creatorID, bool topPick, UUID parcelID, string name, string desc, UUID snapshotID, string user, string originalName, string simName, Vector3 posGlobal, int sortOrder, bool enabled)
         {
             PickInfoReplyPacket pickInfoReply = (PickInfoReplyPacket)PacketPool.Instance.GetPacket(PacketType.PickInfoReply);
 
@@ -10884,18 +3085,7001 @@ namespace OpenSim.Region.ClientStack.LindenUDP
             OutPacket(pickInfoReply, ThrottleOutPacketType.Task);
         }
 
-        public string Report()
+        #endregion Scene/Avatar to Client
+
+        // Gesture
+
+        #region Appearance/ Wearables Methods
+
+        public void SendWearables(AvatarWearable[] wearables, int serial)
         {
-            LLPacketHandler handler = (LLPacketHandler) m_PacketHandler;
-            return handler.PacketQueue.GetStats();
-        }
-        
-        public string XReport(string uptime, string version) 
-        {
-            return  "";
+            AgentWearablesUpdatePacket aw = (AgentWearablesUpdatePacket)PacketPool.Instance.GetPacket(PacketType.AgentWearablesUpdate);
+            aw.AgentData.AgentID = AgentId;
+            aw.AgentData.SerialNum = (uint)serial;
+            aw.AgentData.SessionID = m_sessionId;
+
+            // TODO: don't create new blocks if recycling an old packet
+            aw.WearableData = new AgentWearablesUpdatePacket.WearableDataBlock[13];
+            AgentWearablesUpdatePacket.WearableDataBlock awb;
+            for (int i = 0; i < wearables.Length; i++)
+            {
+                awb = new AgentWearablesUpdatePacket.WearableDataBlock();
+                awb.WearableType = (byte)i;
+                awb.AssetID = wearables[i].AssetID;
+                awb.ItemID = wearables[i].ItemID;
+                aw.WearableData[i] = awb;
+
+                //                m_log.DebugFormat(
+                //                    "[APPEARANCE]: Sending wearable item/asset {0} {1} (index {2}) for {3}",
+                //                    awb.ItemID, awb.AssetID, i, Name);
+            }
+
+            OutPacket(aw, ThrottleOutPacketType.Task);
         }
 
-        public void MakeAssetRequest(TransferRequestPacket transferRequest)
+        public void SendAppearance(UUID agentID, byte[] visualParams, byte[] textureEntry)
+        {
+            AvatarAppearancePacket avp = (AvatarAppearancePacket)PacketPool.Instance.GetPacket(PacketType.AvatarAppearance);
+            // TODO: don't create new blocks if recycling an old packet
+            avp.VisualParam = new AvatarAppearancePacket.VisualParamBlock[218];
+            avp.ObjectData.TextureEntry = textureEntry;
+
+            AvatarAppearancePacket.VisualParamBlock avblock = null;
+            for (int i = 0; i < visualParams.Length; i++)
+            {
+                avblock = new AvatarAppearancePacket.VisualParamBlock();
+                avblock.ParamValue = visualParams[i];
+                avp.VisualParam[i] = avblock;
+            }
+
+            avp.Sender.IsTrial = false;
+            avp.Sender.ID = agentID;
+            OutPacket(avp, ThrottleOutPacketType.Task);
+        }
+
+        public void SendAnimations(UUID[] animations, int[] seqs, UUID sourceAgentId, UUID[] objectIDs)
+        {
+            //m_log.DebugFormat("[CLIENT]: Sending animations to {0}", Name);
+
+            AvatarAnimationPacket ani = (AvatarAnimationPacket)PacketPool.Instance.GetPacket(PacketType.AvatarAnimation);
+            // TODO: don't create new blocks if recycling an old packet
+            ani.AnimationSourceList = new AvatarAnimationPacket.AnimationSourceListBlock[animations.Length];
+            ani.Sender = new AvatarAnimationPacket.SenderBlock();
+            ani.Sender.ID = sourceAgentId;
+            ani.AnimationList = new AvatarAnimationPacket.AnimationListBlock[animations.Length];
+            ani.PhysicalAvatarEventList = new AvatarAnimationPacket.PhysicalAvatarEventListBlock[0];
+
+            for (int i = 0; i < animations.Length; ++i)
+            {
+                ani.AnimationList[i] = new AvatarAnimationPacket.AnimationListBlock();
+                ani.AnimationList[i].AnimID = animations[i];
+                ani.AnimationList[i].AnimSequenceID = seqs[i];
+
+                ani.AnimationSourceList[i] = new AvatarAnimationPacket.AnimationSourceListBlock();
+                ani.AnimationSourceList[i].ObjectID = objectIDs[i];
+                if (objectIDs[i] == UUID.Zero)
+                    ani.AnimationSourceList[i].ObjectID = sourceAgentId;
+            }
+            ani.Header.Reliable = false;
+            OutPacket(ani, ThrottleOutPacketType.Task);
+        }
+
+        #endregion
+
+        #region Prim/Avatar Updates
+
+        /*void SendObjectUpdate(SceneObjectPart obj, PrimFlags creatorFlags, PrimUpdateFlags updateFlags)
+        {
+            bool canUseCompressed, canUseImproved;
+            UpdateFlagsToPacketType(creatorFlags, updateFlags, out canUseCompressed, out canUseImproved);
+
+            if (!canUseImproved && !canUseCompressed)
+                SendFullObjectUpdate(obj, creatorFlags, updateFlags);
+            else if (!canUseImproved)
+                SendObjectUpdateCompressed(obj, creatorFlags, updateFlags);
+            else
+                SendImprovedTerseObjectUpdate(obj, creatorFlags, updateFlags);
+        }
+
+        void SendFullObjectUpdate(SceneObjectPart obj, PrimFlags creatorFlags, PrimUpdateFlags updateFlags)
+        {
+            IClientAPI owner;
+            if (m_scene.ClientManager.TryGetValue(obj.OwnerID, out owner) && owner is LLClientView)
+            {
+                LLClientView llOwner = (LLClientView)owner;
+
+                // Send an update out to the owner
+                ObjectUpdatePacket updateToOwner = new ObjectUpdatePacket();
+                updateToOwner.RegionData.RegionHandle = obj.RegionHandle;
+                //updateToOwner.RegionData.TimeDilation = (ushort)(timeDilation * (float)UInt16.MaxValue);
+                updateToOwner.ObjectData = new ObjectUpdatePacket.ObjectDataBlock[1];
+                updateToOwner.ObjectData[0] = BuildUpdateBlock(obj, obj.Flags | creatorFlags | PrimFlags.ObjectYouOwner, 0);
+
+                m_udpServer.SendPacket(llOwner.UDPClient, updateToOwner, ThrottleOutPacketType.State, true);
+            }
+
+            // Send an update out to everyone else
+            ObjectUpdatePacket updateToOthers = new ObjectUpdatePacket();
+            updateToOthers.RegionData.RegionHandle = obj.RegionHandle;
+            //updateToOthers.RegionData.TimeDilation = (ushort)(timeDilation * (float)UInt16.MaxValue);
+            updateToOthers.ObjectData = new ObjectUpdatePacket.ObjectDataBlock[1];
+            updateToOthers.ObjectData[0] = BuildUpdateBlock(obj, obj.Flags, 0);
+
+            m_scene.ClientManager.ForEach(
+                delegate(IClientAPI client)
+                {
+                    if (client.AgentId != obj.OwnerID && client is LLClientView)
+                    {
+                        LLClientView llClient = (LLClientView)client;
+                        m_udpServer.SendPacket(llClient.UDPClient, updateToOthers, ThrottleOutPacketType.State, true);
+                    }
+                }
+            );
+        }
+
+        void SendObjectUpdateCompressed(SceneObjectPart obj, PrimFlags creatorFlags, PrimUpdateFlags updateFlags)
+        {
+        }
+
+        void SendImprovedTerseObjectUpdate(SceneObjectPart obj, PrimFlags creatorFlags, PrimUpdateFlags updateFlags)
+        {
+        }
+
+        void UpdateFlagsToPacketType(PrimFlags creatorFlags, PrimUpdateFlags updateFlags, out bool canUseCompressed, out bool canUseImproved)
+        {
+            canUseCompressed = true;
+            canUseImproved = true;
+
+            if ((updateFlags & PrimUpdateFlags.FullUpdate) == PrimUpdateFlags.FullUpdate || creatorFlags != PrimFlags.None)
+            {
+                canUseCompressed = false;
+                canUseImproved = false;
+            }
+            else
+            {
+                if ((updateFlags & PrimUpdateFlags.Velocity) != 0 ||
+                    (updateFlags & PrimUpdateFlags.Acceleration) != 0 ||
+                    (updateFlags & PrimUpdateFlags.CollisionPlane) != 0 ||
+                    (updateFlags & PrimUpdateFlags.Joint) != 0)
+                {
+                    canUseCompressed = false;
+                }
+
+                if ((updateFlags & PrimUpdateFlags.PrimFlags) != 0 ||
+                    (updateFlags & PrimUpdateFlags.ParentID) != 0 ||
+                    (updateFlags & PrimUpdateFlags.Scale) != 0 ||
+                    (updateFlags & PrimUpdateFlags.PrimData) != 0 ||
+                    (updateFlags & PrimUpdateFlags.Text) != 0 ||
+                    (updateFlags & PrimUpdateFlags.NameValue) != 0 ||
+                    (updateFlags & PrimUpdateFlags.ExtraData) != 0 ||
+                    (updateFlags & PrimUpdateFlags.TextureAnim) != 0 ||
+                    (updateFlags & PrimUpdateFlags.Sound) != 0 ||
+                    (updateFlags & PrimUpdateFlags.Particles) != 0 ||
+                    (updateFlags & PrimUpdateFlags.Material) != 0 ||
+                    (updateFlags & PrimUpdateFlags.ClickAction) != 0 ||
+                    (updateFlags & PrimUpdateFlags.MediaURL) != 0 ||
+                    (updateFlags & PrimUpdateFlags.Joint) != 0)
+                {
+                    canUseImproved = false;
+                }
+            }
+        }*/
+
+        #endregion Prim/Avatar Updates
+
+        #region Avatar Packet/Data Sending Methods
+
+        /// <summary>
+        /// Send an ObjectUpdate packet with information about an avatar
+        /// </summary>
+        public void SendAvatarData(SendAvatarData data)
+        {
+            ObjectUpdatePacket objupdate = (ObjectUpdatePacket)PacketPool.Instance.GetPacket(PacketType.ObjectUpdate);
+            objupdate.Header.Zerocoded = true;
+
+            objupdate.RegionData.RegionHandle = data.RegionHandle;
+            objupdate.RegionData.TimeDilation = ushort.MaxValue;
+
+            objupdate.ObjectData = new ObjectUpdatePacket.ObjectDataBlock[1];
+            objupdate.ObjectData[0] = CreateAvatarUpdateBlock(data);
+
+            OutPacket(objupdate, ThrottleOutPacketType.Task);
+        }
+
+        /// <summary>
+        /// Send a terse positional/rotation/velocity update about an avatar
+        /// to the client.  This avatar can be that of the client itself.
+        /// </summary>
+        public virtual void SendAvatarTerseUpdate(SendAvatarTerseData data)
+        {
+            if (data.Priority == double.NaN)
+            {
+                m_log.Error("[LLClientView] SendAvatarTerseUpdate received a NaN priority, dropping update");
+                return;
+            }
+
+            Quaternion rotation = data.Rotation;
+            if (rotation.W == 0.0f && rotation.X == 0.0f && rotation.Y == 0.0f && rotation.Z == 0.0f)
+                rotation = Quaternion.Identity;
+
+            ImprovedTerseObjectUpdatePacket.ObjectDataBlock terseBlock = CreateImprovedTerseBlock(data);
+
+            lock (m_avatarTerseUpdates.SyncRoot)
+                m_avatarTerseUpdates.Enqueue(data.Priority, terseBlock, data.LocalID);
+
+            // If we received an update about our own avatar, process the avatar update priority queue immediately
+            if (data.AgentID == m_agentId)
+                ProcessAvatarTerseUpdates();
+        }
+
+        private void ProcessAvatarTerseUpdates()
+        {
+            ImprovedTerseObjectUpdatePacket terse = (ImprovedTerseObjectUpdatePacket)PacketPool.Instance.GetPacket(PacketType.ImprovedTerseObjectUpdate);
+            terse.Header.Reliable = false;
+            terse.Header.Zerocoded = true;
+
+            //terse.RegionData = new ImprovedTerseObjectUpdatePacket.RegionDataBlock();
+            terse.RegionData.RegionHandle = Scene.RegionInfo.RegionHandle;
+            terse.RegionData.TimeDilation = (ushort)(Scene.TimeDilation * ushort.MaxValue);
+
+            lock (m_avatarTerseUpdates.SyncRoot)
+            {
+                int count = Math.Min(m_avatarTerseUpdates.Count, m_udpServer.AvatarTerseUpdatesPerPacket);
+                if (count == 0)
+                    return;
+
+                terse.ObjectData = new ImprovedTerseObjectUpdatePacket.ObjectDataBlock[count];
+                for (int i = 0; i < count; i++)
+                    terse.ObjectData[i] = m_avatarTerseUpdates.Dequeue();
+            }
+
+            OutPacket(terse, ThrottleOutPacketType.Task);
+        }
+
+        public void SendCoarseLocationUpdate(List<UUID> users, List<Vector3> CoarseLocations)
+        {
+            if (!IsActive) return; // We don't need to update inactive clients.
+
+            CoarseLocationUpdatePacket loc = (CoarseLocationUpdatePacket)PacketPool.Instance.GetPacket(PacketType.CoarseLocationUpdate);
+            // TODO: don't create new blocks if recycling an old packet
+            int total = CoarseLocations.Count;
+            CoarseLocationUpdatePacket.IndexBlock ib =
+                new CoarseLocationUpdatePacket.IndexBlock();
+            loc.Location = new CoarseLocationUpdatePacket.LocationBlock[total];
+            loc.AgentData = new CoarseLocationUpdatePacket.AgentDataBlock[total];
+            int selfindex = -1;
+            for (int i = 0; i < total; i++)
+            {
+                CoarseLocationUpdatePacket.LocationBlock lb =
+                    new CoarseLocationUpdatePacket.LocationBlock();
+
+                lb.X = (byte)CoarseLocations[i].X;
+                lb.Y = (byte)CoarseLocations[i].Y;
+
+                lb.Z = CoarseLocations[i].Z > 1024 ? (byte)0 : (byte)(CoarseLocations[i].Z * 0.25);
+                loc.Location[i] = lb;
+                loc.AgentData[i] = new CoarseLocationUpdatePacket.AgentDataBlock();
+                loc.AgentData[i].AgentID = users[i];
+                if (users[i] == AgentId)
+                    selfindex = i;
+            }
+            ib.You = (short)selfindex;
+            ib.Prey = -1;
+            loc.Index = ib;
+            loc.Header.Reliable = false;
+            loc.Header.Zerocoded = true;
+
+            OutPacket(loc, ThrottleOutPacketType.Task);
+        }
+
+        #endregion Avatar Packet/Data Sending Methods
+
+        #region Primitive Packet/Data Sending Methods
+
+        public void SendPrimitiveToClient(SendPrimitiveData data)
+        {
+            if (data.priority == double.NaN)
+            {
+                m_log.Error("[LLClientView] SendPrimitiveToClient received a NaN priority, dropping update");
+                return;
+            }
+
+            Quaternion rotation = data.rotation;
+            if (rotation.W == 0.0f && rotation.X == 0.0f && rotation.Y == 0.0f && rotation.Z == 0.0f)
+                rotation = Quaternion.Identity;
+
+            if (data.AttachPoint > 30 && data.ownerID != AgentId) // Someone else's HUD
+                return;
+            if (data.primShape.State != 0 && data.parentID == 0 && data.primShape.PCode == 9)
+                return;
+
+            ObjectUpdatePacket.ObjectDataBlock objectData = CreatePrimUpdateBlock(data);
+
+            lock (m_primFullUpdates.SyncRoot)
+                m_primFullUpdates.Enqueue(data.priority, objectData, data.localID);
+        }
+
+        void ProcessPrimFullUpdates()
+        {
+            ObjectUpdatePacket outPacket = (ObjectUpdatePacket)PacketPool.Instance.GetPacket(PacketType.ObjectUpdate);
+            outPacket.Header.Zerocoded = true;
+
+            outPacket.RegionData.RegionHandle = Scene.RegionInfo.RegionHandle;
+            outPacket.RegionData.TimeDilation = (ushort)(Scene.TimeDilation * ushort.MaxValue);
+
+            lock (m_primFullUpdates.SyncRoot)
+            {
+                int count = Math.Min(m_primFullUpdates.Count, m_udpServer.PrimFullUpdatesPerPacket);
+                if (count == 0)
+                    return;
+
+                outPacket.ObjectData = new ObjectUpdatePacket.ObjectDataBlock[count];
+                for (int i = 0; i < count; i++)
+                    outPacket.ObjectData[i] = m_primFullUpdates.Dequeue();
+            }
+
+            OutPacket(outPacket, ThrottleOutPacketType.State);
+        }
+
+        public void SendPrimTerseUpdate(SendPrimitiveTerseData data)
+        {
+            if (data.Priority == double.NaN)
+            {
+                m_log.Error("[LLClientView] SendPrimTerseUpdate received a NaN priority, dropping update");
+                return;
+            }
+
+            Quaternion rotation = data.Rotation;
+            if (rotation.W == 0.0f && rotation.X == 0.0f && rotation.Y == 0.0f && rotation.Z == 0.0f)
+                rotation = Quaternion.Identity;
+
+            if (data.AttachPoint > 30 && data.OwnerID != AgentId) // Someone else's HUD
+                return;
+
+            ImprovedTerseObjectUpdatePacket.ObjectDataBlock objectData = CreateImprovedTerseBlock(data);
+
+            lock (m_primTerseUpdates.SyncRoot)
+                m_primTerseUpdates.Enqueue(data.Priority, objectData, data.LocalID);
+        }
+
+        void ProcessPrimTerseUpdates()
+        {
+            ImprovedTerseObjectUpdatePacket outPacket = (ImprovedTerseObjectUpdatePacket)PacketPool.Instance.GetPacket(PacketType.ImprovedTerseObjectUpdate);
+            outPacket.Header.Reliable = false;
+            outPacket.Header.Zerocoded = true;
+
+            outPacket.RegionData.RegionHandle = Scene.RegionInfo.RegionHandle;
+            outPacket.RegionData.TimeDilation = (ushort)(Scene.TimeDilation * ushort.MaxValue);
+
+            lock (m_primTerseUpdates.SyncRoot)
+            {
+                int count = Math.Min(m_primTerseUpdates.Count, m_udpServer.PrimTerseUpdatesPerPacket);
+                if (count == 0)
+                    return;
+
+                outPacket.ObjectData = new ImprovedTerseObjectUpdatePacket.ObjectDataBlock[count];
+                for (int i = 0; i < count; i++)
+                    outPacket.ObjectData[i] = m_primTerseUpdates.Dequeue();
+            }
+
+            OutPacket(outPacket, ThrottleOutPacketType.State);
+        }
+
+        public void ReprioritizeUpdates(StateUpdateTypes type, UpdatePriorityHandler handler)
+        {
+            PriorityQueue<double, ImprovedTerseObjectUpdatePacket.ObjectDataBlock>.UpdatePriorityHandler terse_update_priority_handler =
+                delegate(ref double priority, uint local_id)
+                {
+                    priority = handler(new UpdatePriorityData(priority, local_id));
+                    return priority != double.NaN;
+                };
+            PriorityQueue<double, ObjectUpdatePacket.ObjectDataBlock>.UpdatePriorityHandler update_priority_handler =
+                delegate(ref double priority, uint local_id)
+                {
+                    priority = handler(new UpdatePriorityData(priority, local_id));
+                    return priority != double.NaN;
+                };
+
+            if ((type & StateUpdateTypes.AvatarTerse) != 0)
+            {
+                lock (m_avatarTerseUpdates.SyncRoot)
+                    m_avatarTerseUpdates.Reprioritize(terse_update_priority_handler);
+            }
+
+            if ((type & StateUpdateTypes.PrimitiveFull) != 0)
+            {
+                lock (m_primFullUpdates.SyncRoot)
+                    m_primFullUpdates.Reprioritize(update_priority_handler);
+            }
+
+            if ((type & StateUpdateTypes.PrimitiveTerse) != 0)
+            {
+                lock (m_primTerseUpdates.SyncRoot)
+                    m_primTerseUpdates.Reprioritize(terse_update_priority_handler);
+            }
+        }
+
+        public void FlushPrimUpdates()
+        {
+            while (m_primFullUpdates.Count > 0)
+            {
+                ProcessPrimFullUpdates();
+            }
+            while (m_primTerseUpdates.Count > 0)
+            {
+                ProcessPrimTerseUpdates();
+            }
+            while (m_avatarTerseUpdates.Count > 0)
+            {
+                ProcessAvatarTerseUpdates();
+            }
+        }
+
+        #endregion Primitive Packet/Data Sending Methods
+
+        /// <summary>
+        ///
+        /// </summary>
+        /// <param name="localID"></param>
+        /// <param name="rotation"></param>
+        /// <param name="attachPoint"></param>
+        public void AttachObject(uint localID, Quaternion rotation, byte attachPoint, UUID ownerID)
+        {
+            if (attachPoint > 30 && ownerID != AgentId) // Someone else's HUD
+                return;
+
+            ObjectAttachPacket attach = (ObjectAttachPacket)PacketPool.Instance.GetPacket(PacketType.ObjectAttach);
+            // TODO: don't create new blocks if recycling an old packet
+            attach.AgentData.AgentID = AgentId;
+            attach.AgentData.SessionID = m_sessionId;
+            attach.AgentData.AttachmentPoint = attachPoint;
+            attach.ObjectData = new ObjectAttachPacket.ObjectDataBlock[1];
+            attach.ObjectData[0] = new ObjectAttachPacket.ObjectDataBlock();
+            attach.ObjectData[0].ObjectLocalID = localID;
+            attach.ObjectData[0].Rotation = rotation;
+            attach.Header.Zerocoded = true;
+            OutPacket(attach, ThrottleOutPacketType.Task);
+        }
+
+        void HandleQueueEmpty(ThrottleOutPacketTypeFlags categories)
+        {
+            if ((categories & ThrottleOutPacketTypeFlags.Task) != 0)
+            {
+                lock (m_avatarTerseUpdates.SyncRoot)
+                {
+                    if (m_avatarTerseUpdates.Count > 0)
+                        ProcessAvatarTerseUpdates();
+                }
+            }
+
+            if ((categories & ThrottleOutPacketTypeFlags.State) != 0)
+            {
+                lock (m_primFullUpdates.SyncRoot)
+                {
+                    if (m_primFullUpdates.Count > 0)
+                        ProcessPrimFullUpdates();
+                }
+
+                lock (m_primTerseUpdates.SyncRoot)
+                {
+                    if (m_primTerseUpdates.Count > 0)
+                        ProcessPrimTerseUpdates();
+                }
+            }
+
+            if ((categories & ThrottleOutPacketTypeFlags.Texture) != 0)
+            {
+                ProcessTextureRequests();
+            }
+        }
+
+        void ProcessTextureRequests()
+        {
+            if (m_imageManager != null)
+                m_imageManager.ProcessImageQueue(m_udpServer.TextureSendLimit);
+        }
+
+        public void SendAssetUploadCompleteMessage(sbyte AssetType, bool Success, UUID AssetFullID)
+        {
+            AssetUploadCompletePacket newPack = new AssetUploadCompletePacket();
+            newPack.AssetBlock.Type = AssetType;
+            newPack.AssetBlock.Success = Success;
+            newPack.AssetBlock.UUID = AssetFullID;
+            newPack.Header.Zerocoded = true;
+            OutPacket(newPack, ThrottleOutPacketType.Asset);
+        }
+
+        public void SendXferRequest(ulong XferID, short AssetType, UUID vFileID, byte FilePath, byte[] FileName)
+        {
+            RequestXferPacket newPack = new RequestXferPacket();
+            newPack.XferID.ID = XferID;
+            newPack.XferID.VFileType = AssetType;
+            newPack.XferID.VFileID = vFileID;
+            newPack.XferID.FilePath = FilePath;
+            newPack.XferID.Filename = FileName;
+            newPack.Header.Zerocoded = true;
+            OutPacket(newPack, ThrottleOutPacketType.Asset);
+        }
+
+        public void SendConfirmXfer(ulong xferID, uint PacketID)
+        {
+            ConfirmXferPacketPacket newPack = new ConfirmXferPacketPacket();
+            newPack.XferID.ID = xferID;
+            newPack.XferID.Packet = PacketID;
+            newPack.Header.Zerocoded = true;
+            OutPacket(newPack, ThrottleOutPacketType.Asset);
+        }
+
+        public void SendInitiateDownload(string simFileName, string clientFileName)
+        {
+            InitiateDownloadPacket newPack = new InitiateDownloadPacket();
+            newPack.AgentData.AgentID = AgentId;
+            newPack.FileData.SimFilename = Utils.StringToBytes(simFileName);
+            newPack.FileData.ViewerFilename = Utils.StringToBytes(clientFileName);
+            OutPacket(newPack, ThrottleOutPacketType.Asset);
+        }
+
+        public void SendImageFirstPart(
+            ushort numParts, UUID ImageUUID, uint ImageSize, byte[] ImageData, byte imageCodec)
+        {
+            ImageDataPacket im = new ImageDataPacket();
+            im.Header.Reliable = false;
+            im.ImageID.Packets = numParts;
+            im.ImageID.ID = ImageUUID;
+
+            if (ImageSize > 0)
+                im.ImageID.Size = ImageSize;
+
+            im.ImageData.Data = ImageData;
+            im.ImageID.Codec = imageCodec;
+            im.Header.Zerocoded = true;
+            OutPacket(im, ThrottleOutPacketType.Texture);
+        }
+
+        public void SendImageNextPart(ushort partNumber, UUID imageUuid, byte[] imageData)
+        {
+            ImagePacketPacket im = new ImagePacketPacket();
+            im.Header.Reliable = false;
+            im.ImageID.Packet = partNumber;
+            im.ImageID.ID = imageUuid;
+            im.ImageData.Data = imageData;
+
+            OutPacket(im, ThrottleOutPacketType.Texture);
+        }
+
+        public void SendImageNotFound(UUID imageid)
+        {
+            ImageNotInDatabasePacket notFoundPacket
+            = (ImageNotInDatabasePacket)PacketPool.Instance.GetPacket(PacketType.ImageNotInDatabase);
+
+            notFoundPacket.ImageID.ID = imageid;
+
+            OutPacket(notFoundPacket, ThrottleOutPacketType.Texture);
+        }
+
+        public void SendShutdownConnectionNotice()
+        {
+            OutPacket(PacketPool.Instance.GetPacket(PacketType.DisableSimulator), ThrottleOutPacketType.Unknown);
+        }
+
+        public void SendSimStats(SimStats stats)
+        {
+            SimStatsPacket pack = new SimStatsPacket();
+            pack.Region = new SimStatsPacket.RegionBlock();
+            pack.Region.RegionX = stats.RegionX;
+            pack.Region.RegionY = stats.RegionY;
+            pack.Region.RegionFlags = stats.RegionFlags;
+            pack.Region.ObjectCapacity = stats.ObjectCapacity;
+            //pack.Region = //stats.RegionBlock;
+            pack.Stat = stats.StatsBlock;
+
+            pack.Header.Reliable = false;
+
+            OutPacket(pack, ThrottleOutPacketType.Task);
+        }
+
+        public void SendObjectPropertiesFamilyData(uint RequestFlags, UUID ObjectUUID, UUID OwnerID, UUID GroupID,
+                                                    uint BaseMask, uint OwnerMask, uint GroupMask, uint EveryoneMask,
+                                                    uint NextOwnerMask, int OwnershipCost, byte SaleType, int SalePrice, uint Category,
+                                                    UUID LastOwnerID, string ObjectName, string Description)
+        {
+            ObjectPropertiesFamilyPacket objPropFamilyPack = (ObjectPropertiesFamilyPacket)PacketPool.Instance.GetPacket(PacketType.ObjectPropertiesFamily);
+            // TODO: don't create new blocks if recycling an old packet
+
+            ObjectPropertiesFamilyPacket.ObjectDataBlock objPropDB = new ObjectPropertiesFamilyPacket.ObjectDataBlock();
+            objPropDB.RequestFlags = RequestFlags;
+            objPropDB.ObjectID = ObjectUUID;
+            if (OwnerID == GroupID)
+                objPropDB.OwnerID = UUID.Zero;
+            else
+                objPropDB.OwnerID = OwnerID;
+            objPropDB.GroupID = GroupID;
+            objPropDB.BaseMask = BaseMask;
+            objPropDB.OwnerMask = OwnerMask;
+            objPropDB.GroupMask = GroupMask;
+            objPropDB.EveryoneMask = EveryoneMask;
+            objPropDB.NextOwnerMask = NextOwnerMask;
+
+            // TODO: More properties are needed in SceneObjectPart!
+            objPropDB.OwnershipCost = OwnershipCost;
+            objPropDB.SaleType = SaleType;
+            objPropDB.SalePrice = SalePrice;
+            objPropDB.Category = Category;
+            objPropDB.LastOwnerID = LastOwnerID;
+            objPropDB.Name = Util.StringToBytes256(ObjectName);
+            objPropDB.Description = Util.StringToBytes256(Description);
+            objPropFamilyPack.ObjectData = objPropDB;
+            objPropFamilyPack.Header.Zerocoded = true;
+            OutPacket(objPropFamilyPack, ThrottleOutPacketType.Task);
+        }
+
+        public void SendObjectPropertiesReply(
+            UUID ItemID, ulong CreationDate, UUID CreatorUUID, UUID FolderUUID, UUID FromTaskUUID,
+            UUID GroupUUID, short InventorySerial, UUID LastOwnerUUID, UUID ObjectUUID,
+            UUID OwnerUUID, string TouchTitle, byte[] TextureID, string SitTitle, string ItemName,
+            string ItemDescription, uint OwnerMask, uint NextOwnerMask, uint GroupMask, uint EveryoneMask,
+            uint BaseMask, byte saleType, int salePrice)
+        {
+            ObjectPropertiesPacket proper = (ObjectPropertiesPacket)PacketPool.Instance.GetPacket(PacketType.ObjectProperties);
+            // TODO: don't create new blocks if recycling an old packet
+
+            proper.ObjectData = new ObjectPropertiesPacket.ObjectDataBlock[1];
+            proper.ObjectData[0] = new ObjectPropertiesPacket.ObjectDataBlock();
+            proper.ObjectData[0].ItemID = ItemID;
+            proper.ObjectData[0].CreationDate = CreationDate;
+            proper.ObjectData[0].CreatorID = CreatorUUID;
+            proper.ObjectData[0].FolderID = FolderUUID;
+            proper.ObjectData[0].FromTaskID = FromTaskUUID;
+            proper.ObjectData[0].GroupID = GroupUUID;
+            proper.ObjectData[0].InventorySerial = InventorySerial;
+
+            proper.ObjectData[0].LastOwnerID = LastOwnerUUID;
+            //            proper.ObjectData[0].LastOwnerID = UUID.Zero;
+
+            proper.ObjectData[0].ObjectID = ObjectUUID;
+            if (OwnerUUID == GroupUUID)
+                proper.ObjectData[0].OwnerID = UUID.Zero;
+            else
+                proper.ObjectData[0].OwnerID = OwnerUUID;
+            proper.ObjectData[0].TouchName = Util.StringToBytes256(TouchTitle);
+            proper.ObjectData[0].TextureID = TextureID;
+            proper.ObjectData[0].SitName = Util.StringToBytes256(SitTitle);
+            proper.ObjectData[0].Name = Util.StringToBytes256(ItemName);
+            proper.ObjectData[0].Description = Util.StringToBytes256(ItemDescription);
+            proper.ObjectData[0].OwnerMask = OwnerMask;
+            proper.ObjectData[0].NextOwnerMask = NextOwnerMask;
+            proper.ObjectData[0].GroupMask = GroupMask;
+            proper.ObjectData[0].EveryoneMask = EveryoneMask;
+            proper.ObjectData[0].BaseMask = BaseMask;
+            //            proper.ObjectData[0].AggregatePerms = 53;
+            //            proper.ObjectData[0].AggregatePermTextures = 0;
+            //            proper.ObjectData[0].AggregatePermTexturesOwner = 0;
+            proper.ObjectData[0].SaleType = saleType;
+            proper.ObjectData[0].SalePrice = salePrice;
+            proper.Header.Zerocoded = true;
+            OutPacket(proper, ThrottleOutPacketType.Task);
+        }
+
+        #region Estate Data Sending Methods
+
+        private static bool convertParamStringToBool(byte[] field)
+        {
+            string s = Utils.BytesToString(field);
+            if (s == "1" || s.ToLower() == "y" || s.ToLower() == "yes" || s.ToLower() == "t" || s.ToLower() == "true")
+            {
+                return true;
+            }
+            return false;
+        }
+
+        public void SendEstateManagersList(UUID invoice, UUID[] EstateManagers, uint estateID)
+        {
+            EstateOwnerMessagePacket packet = new EstateOwnerMessagePacket();
+            packet.AgentData.TransactionID = UUID.Random();
+            packet.AgentData.AgentID = AgentId;
+            packet.AgentData.SessionID = SessionId;
+            packet.MethodData.Invoice = invoice;
+            packet.MethodData.Method = Utils.StringToBytes("setaccess");
+
+            EstateOwnerMessagePacket.ParamListBlock[] returnblock = new EstateOwnerMessagePacket.ParamListBlock[6 + EstateManagers.Length];
+
+            for (int i = 0; i < (6 + EstateManagers.Length); i++)
+            {
+                returnblock[i] = new EstateOwnerMessagePacket.ParamListBlock();
+            }
+            int j = 0;
+
+            returnblock[j].Parameter = Utils.StringToBytes(estateID.ToString()); j++;
+            returnblock[j].Parameter = Utils.StringToBytes(((int)Constants.EstateAccessCodex.EstateManagers).ToString()); j++;
+            returnblock[j].Parameter = Utils.StringToBytes("0"); j++;
+            returnblock[j].Parameter = Utils.StringToBytes("0"); j++;
+            returnblock[j].Parameter = Utils.StringToBytes("0"); j++;
+            returnblock[j].Parameter = Utils.StringToBytes(EstateManagers.Length.ToString()); j++;
+            for (int i = 0; i < EstateManagers.Length; i++)
+            {
+                returnblock[j].Parameter = EstateManagers[i].GetBytes(); j++;
+            }
+            packet.ParamList = returnblock;
+            packet.Header.Reliable = false;
+            OutPacket(packet, ThrottleOutPacketType.Task);
+        }
+
+        public void SendBannedUserList(UUID invoice, EstateBan[] bl, uint estateID)
+        {
+            List<UUID> BannedUsers = new List<UUID>();
+
+            for (int i = 0; i < bl.Length; i++)
+            {
+                if (bl[i] == null)
+                    continue;
+                if (bl[i].BannedUserID == UUID.Zero)
+                    continue;
+                BannedUsers.Add(bl[i].BannedUserID);
+            }
+
+            EstateOwnerMessagePacket packet = new EstateOwnerMessagePacket();
+            packet.AgentData.TransactionID = UUID.Random();
+            packet.AgentData.AgentID = AgentId;
+            packet.AgentData.SessionID = SessionId;
+            packet.MethodData.Invoice = invoice;
+            packet.MethodData.Method = Utils.StringToBytes("setaccess");
+
+            EstateOwnerMessagePacket.ParamListBlock[] returnblock = new EstateOwnerMessagePacket.ParamListBlock[6 + BannedUsers.Count];
+
+            for (int i = 0; i < (6 + BannedUsers.Count); i++)
+            {
+                returnblock[i] = new EstateOwnerMessagePacket.ParamListBlock();
+            }
+            int j = 0;
+
+            returnblock[j].Parameter = Utils.StringToBytes(estateID.ToString()); j++;
+            returnblock[j].Parameter = Utils.StringToBytes(((int)Constants.EstateAccessCodex.EstateBans).ToString()); j++;
+            returnblock[j].Parameter = Utils.StringToBytes("0"); j++;
+            returnblock[j].Parameter = Utils.StringToBytes("0"); j++;
+            returnblock[j].Parameter = Utils.StringToBytes(BannedUsers.Count.ToString()); j++;
+            returnblock[j].Parameter = Utils.StringToBytes("0"); j++;
+
+            foreach (UUID banned in BannedUsers)
+            {
+                returnblock[j].Parameter = banned.GetBytes(); j++;
+            }
+            packet.ParamList = returnblock;
+            packet.Header.Reliable = false;
+            OutPacket(packet, ThrottleOutPacketType.Task);
+        }
+
+        public void SendRegionInfoToEstateMenu(RegionInfoForEstateMenuArgs args)
+        {
+            RegionInfoPacket rinfopack = new RegionInfoPacket();
+            RegionInfoPacket.RegionInfoBlock rinfoblk = new RegionInfoPacket.RegionInfoBlock();
+            rinfopack.AgentData.AgentID = AgentId;
+            rinfopack.AgentData.SessionID = SessionId;
+            rinfoblk.BillableFactor = args.billableFactor;
+            rinfoblk.EstateID = args.estateID;
+            rinfoblk.MaxAgents = args.maxAgents;
+            rinfoblk.ObjectBonusFactor = args.objectBonusFactor;
+            rinfoblk.ParentEstateID = args.parentEstateID;
+            rinfoblk.PricePerMeter = args.pricePerMeter;
+            rinfoblk.RedirectGridX = args.redirectGridX;
+            rinfoblk.RedirectGridY = args.redirectGridY;
+            rinfoblk.RegionFlags = args.regionFlags;
+            rinfoblk.SimAccess = args.simAccess;
+            rinfoblk.SunHour = args.sunHour;
+            rinfoblk.TerrainLowerLimit = args.terrainLowerLimit;
+            rinfoblk.TerrainRaiseLimit = args.terrainRaiseLimit;
+            rinfoblk.UseEstateSun = args.useEstateSun;
+            rinfoblk.WaterHeight = args.waterHeight;
+            rinfoblk.SimName = Utils.StringToBytes(args.simName);
+
+            rinfopack.RegionInfo2 = new RegionInfoPacket.RegionInfo2Block();
+            rinfopack.RegionInfo2.HardMaxAgents = uint.MaxValue;
+            rinfopack.RegionInfo2.HardMaxObjects = uint.MaxValue;
+            rinfopack.RegionInfo2.MaxAgents32 = uint.MaxValue;
+            rinfopack.RegionInfo2.ProductName = Utils.EmptyBytes;
+            rinfopack.RegionInfo2.ProductSKU = Utils.EmptyBytes;
+
+            rinfopack.HasVariableBlocks = true;
+            rinfopack.RegionInfo = rinfoblk;
+            rinfopack.AgentData = new RegionInfoPacket.AgentDataBlock();
+            rinfopack.AgentData.AgentID = AgentId;
+            rinfopack.AgentData.SessionID = SessionId;
+
+
+            OutPacket(rinfopack, ThrottleOutPacketType.Task);
+        }
+
+        public void SendEstateCovenantInformation(UUID covenant)
+        {
+            EstateCovenantReplyPacket einfopack = new EstateCovenantReplyPacket();
+            EstateCovenantReplyPacket.DataBlock edata = new EstateCovenantReplyPacket.DataBlock();
+            edata.CovenantID = covenant;
+            edata.CovenantTimestamp = 0;
+            if (m_scene.RegionInfo.EstateSettings.EstateOwner != UUID.Zero)
+                edata.EstateOwnerID = m_scene.RegionInfo.EstateSettings.EstateOwner;
+            else
+                edata.EstateOwnerID = m_scene.RegionInfo.MasterAvatarAssignedUUID;
+            edata.EstateName = Utils.StringToBytes(m_scene.RegionInfo.EstateSettings.EstateName);
+            einfopack.Data = edata;
+            OutPacket(einfopack, ThrottleOutPacketType.Task);
+        }
+
+        public void SendDetailedEstateData(UUID invoice, string estateName, uint estateID, uint parentEstate, uint estateFlags, uint sunPosition, UUID covenant, string abuseEmail, UUID estateOwner)
+        {
+            EstateOwnerMessagePacket packet = new EstateOwnerMessagePacket();
+            packet.MethodData.Invoice = invoice;
+            packet.AgentData.TransactionID = UUID.Random();
+            packet.MethodData.Method = Utils.StringToBytes("estateupdateinfo");
+            EstateOwnerMessagePacket.ParamListBlock[] returnblock = new EstateOwnerMessagePacket.ParamListBlock[10];
+
+            for (int i = 0; i < 10; i++)
+            {
+                returnblock[i] = new EstateOwnerMessagePacket.ParamListBlock();
+            }
+
+            //Sending Estate Settings
+            returnblock[0].Parameter = Utils.StringToBytes(estateName);
+            // TODO: remove this cruft once MasterAvatar is fully deprecated
+            //
+            returnblock[1].Parameter = Utils.StringToBytes(estateOwner.ToString());
+            returnblock[2].Parameter = Utils.StringToBytes(estateID.ToString());
+
+            returnblock[3].Parameter = Utils.StringToBytes(estateFlags.ToString());
+            returnblock[4].Parameter = Utils.StringToBytes(sunPosition.ToString());
+            returnblock[5].Parameter = Utils.StringToBytes(parentEstate.ToString());
+            returnblock[6].Parameter = Utils.StringToBytes(covenant.ToString());
+            returnblock[7].Parameter = Utils.StringToBytes("1160895077"); // what is this?
+            returnblock[8].Parameter = Utils.StringToBytes("1"); // what is this?
+            returnblock[9].Parameter = Utils.StringToBytes(abuseEmail);
+
+            packet.ParamList = returnblock;
+            packet.Header.Reliable = false;
+            //m_log.Debug("[ESTATE]: SIM--->" + packet.ToString());
+            OutPacket(packet, ThrottleOutPacketType.Task);
+        }
+
+        #endregion
+
+        #region Land Data Sending Methods
+
+        public void SendLandParcelOverlay(byte[] data, int sequence_id)
+        {
+            ParcelOverlayPacket packet = (ParcelOverlayPacket)PacketPool.Instance.GetPacket(PacketType.ParcelOverlay);
+            packet.ParcelData.Data = data;
+            packet.ParcelData.SequenceID = sequence_id;
+            packet.Header.Zerocoded = true;
+            OutPacket(packet, ThrottleOutPacketType.Task);
+        }
+
+        public void SendLandProperties(int sequence_id, bool snap_selection, int request_result, LandData landData, float simObjectBonusFactor, int parcelObjectCapacity, int simObjectCapacity, uint regionFlags)
+        {
+            ParcelPropertiesPacket updatePacket = (ParcelPropertiesPacket)PacketPool.Instance.GetPacket(PacketType.ParcelProperties);
+            // TODO: don't create new blocks if recycling an old packet
+
+            updatePacket.ParcelData.AABBMax = landData.AABBMax;
+            updatePacket.ParcelData.AABBMin = landData.AABBMin;
+            updatePacket.ParcelData.Area = landData.Area;
+            updatePacket.ParcelData.AuctionID = landData.AuctionID;
+            updatePacket.ParcelData.AuthBuyerID = landData.AuthBuyerID;
+
+            updatePacket.ParcelData.Bitmap = landData.Bitmap;
+
+            updatePacket.ParcelData.Desc = Utils.StringToBytes(landData.Description);
+            updatePacket.ParcelData.Category = (byte)landData.Category;
+            updatePacket.ParcelData.ClaimDate = landData.ClaimDate;
+            updatePacket.ParcelData.ClaimPrice = landData.ClaimPrice;
+            updatePacket.ParcelData.GroupID = landData.GroupID;
+            updatePacket.ParcelData.GroupPrims = landData.GroupPrims;
+            updatePacket.ParcelData.IsGroupOwned = landData.IsGroupOwned;
+            updatePacket.ParcelData.LandingType = landData.LandingType;
+            updatePacket.ParcelData.LocalID = landData.LocalID;
+
+            if (landData.Area > 0)
+            {
+                updatePacket.ParcelData.MaxPrims = parcelObjectCapacity;
+            }
+            else
+            {
+                updatePacket.ParcelData.MaxPrims = 0;
+            }
+
+            updatePacket.ParcelData.MediaAutoScale = landData.MediaAutoScale;
+            updatePacket.ParcelData.MediaID = landData.MediaID;
+            updatePacket.ParcelData.MediaURL = Util.StringToBytes256(landData.MediaURL);
+            updatePacket.ParcelData.MusicURL = Util.StringToBytes256(landData.MusicURL);
+            updatePacket.ParcelData.Name = Util.StringToBytes256(landData.Name);
+            updatePacket.ParcelData.OtherCleanTime = landData.OtherCleanTime;
+            updatePacket.ParcelData.OtherCount = 0; //TODO: Unimplemented
+            updatePacket.ParcelData.OtherPrims = landData.OtherPrims;
+            updatePacket.ParcelData.OwnerID = landData.OwnerID;
+            updatePacket.ParcelData.OwnerPrims = landData.OwnerPrims;
+            updatePacket.ParcelData.ParcelFlags = landData.Flags;
+            updatePacket.ParcelData.ParcelPrimBonus = simObjectBonusFactor;
+            updatePacket.ParcelData.PassHours = landData.PassHours;
+            updatePacket.ParcelData.PassPrice = landData.PassPrice;
+            updatePacket.ParcelData.PublicCount = 0; //TODO: Unimplemented
+
+            updatePacket.ParcelData.RegionDenyAnonymous = (regionFlags & (uint)RegionFlags.DenyAnonymous) > 0;
+            updatePacket.ParcelData.RegionDenyIdentified = (regionFlags & (uint)RegionFlags.DenyIdentified) > 0;
+            updatePacket.ParcelData.RegionDenyTransacted = (regionFlags & (uint)RegionFlags.DenyTransacted) > 0;
+            updatePacket.ParcelData.RegionPushOverride = (regionFlags & (uint)RegionFlags.RestrictPushObject) > 0;
+
+            updatePacket.ParcelData.RentPrice = 0;
+            updatePacket.ParcelData.RequestResult = request_result;
+            updatePacket.ParcelData.SalePrice = landData.SalePrice;
+            updatePacket.ParcelData.SelectedPrims = landData.SelectedPrims;
+            updatePacket.ParcelData.SelfCount = 0; //TODO: Unimplemented
+            updatePacket.ParcelData.SequenceID = sequence_id;
+            if (landData.SimwideArea > 0)
+            {
+                updatePacket.ParcelData.SimWideMaxPrims = parcelObjectCapacity;
+            }
+            else
+            {
+                updatePacket.ParcelData.SimWideMaxPrims = 0;
+            }
+            updatePacket.ParcelData.SimWideTotalPrims = landData.SimwidePrims;
+            updatePacket.ParcelData.SnapSelection = snap_selection;
+            updatePacket.ParcelData.SnapshotID = landData.SnapshotID;
+            updatePacket.ParcelData.Status = (byte)landData.Status;
+            updatePacket.ParcelData.TotalPrims = landData.OwnerPrims + landData.GroupPrims + landData.OtherPrims +
+                                                 landData.SelectedPrims;
+            updatePacket.ParcelData.UserLocation = landData.UserLocation;
+            updatePacket.ParcelData.UserLookAt = landData.UserLookAt;
+            updatePacket.Header.Zerocoded = true;
+
+            try
+            {
+                IEventQueue eq = Scene.RequestModuleInterface<IEventQueue>();
+                if (eq != null)
+                {
+                    eq.ParcelProperties(updatePacket, this.AgentId);
+                }
+            }
+            catch (Exception ex)
+            {
+                m_log.Error("Unable to send parcel data via eventqueue - exception: " + ex.ToString());
+                m_log.Warn("sending parcel data via UDP");
+                OutPacket(updatePacket, ThrottleOutPacketType.Task);
+            }
+        }
+
+        public void SendLandAccessListData(List<UUID> avatars, uint accessFlag, int localLandID)
+        {
+            ParcelAccessListReplyPacket replyPacket = (ParcelAccessListReplyPacket)PacketPool.Instance.GetPacket(PacketType.ParcelAccessListReply);
+            replyPacket.Data.AgentID = AgentId;
+            replyPacket.Data.Flags = accessFlag;
+            replyPacket.Data.LocalID = localLandID;
+            replyPacket.Data.SequenceID = 0;
+
+            List<ParcelAccessListReplyPacket.ListBlock> list = new List<ParcelAccessListReplyPacket.ListBlock>();
+            foreach (UUID avatar in avatars)
+            {
+                ParcelAccessListReplyPacket.ListBlock block = new ParcelAccessListReplyPacket.ListBlock();
+                block.Flags = accessFlag;
+                block.ID = avatar;
+                block.Time = 0;
+                list.Add(block);
+            }
+
+            replyPacket.List = list.ToArray();
+            replyPacket.Header.Zerocoded = true;
+            OutPacket(replyPacket, ThrottleOutPacketType.Task);
+        }
+
+        public void SendForceClientSelectObjects(List<uint> ObjectIDs)
+        {
+            bool firstCall = true;
+            const int MAX_OBJECTS_PER_PACKET = 251;
+            ForceObjectSelectPacket pack = (ForceObjectSelectPacket)PacketPool.Instance.GetPacket(PacketType.ForceObjectSelect);
+            ForceObjectSelectPacket.DataBlock[] data;
+            while (ObjectIDs.Count > 0)
+            {
+                if (firstCall)
+                {
+                    pack._Header.ResetList = true;
+                    firstCall = false;
+                }
+                else
+                {
+                    pack._Header.ResetList = false;
+                }
+
+                if (ObjectIDs.Count > MAX_OBJECTS_PER_PACKET)
+                {
+                    data = new ForceObjectSelectPacket.DataBlock[MAX_OBJECTS_PER_PACKET];
+                }
+                else
+                {
+                    data = new ForceObjectSelectPacket.DataBlock[ObjectIDs.Count];
+                }
+
+                int i;
+                for (i = 0; i < MAX_OBJECTS_PER_PACKET && ObjectIDs.Count > 0; i++)
+                {
+                    data[i] = new ForceObjectSelectPacket.DataBlock();
+                    data[i].LocalID = Convert.ToUInt32(ObjectIDs[0]);
+                    ObjectIDs.RemoveAt(0);
+                }
+                pack.Data = data;
+                pack.Header.Zerocoded = true;
+                OutPacket(pack, ThrottleOutPacketType.Task);
+            }
+        }
+
+        public void SendCameraConstraint(Vector4 ConstraintPlane)
+        {
+            CameraConstraintPacket cpack = (CameraConstraintPacket)PacketPool.Instance.GetPacket(PacketType.CameraConstraint);
+            cpack.CameraCollidePlane = new CameraConstraintPacket.CameraCollidePlaneBlock();
+            cpack.CameraCollidePlane.Plane = ConstraintPlane;
+            //m_log.DebugFormat("[CLIENTVIEW]: Constraint {0}", ConstraintPlane);
+            OutPacket(cpack, ThrottleOutPacketType.Task);
+        }
+
+        public void SendLandObjectOwners(LandData land, List<UUID> groups, Dictionary<UUID, int> ownersAndCount)
+        {
+
+
+            int notifyCount = ownersAndCount.Count;
+            ParcelObjectOwnersReplyPacket pack = (ParcelObjectOwnersReplyPacket)PacketPool.Instance.GetPacket(PacketType.ParcelObjectOwnersReply);
+
+            if (notifyCount > 0)
+            {
+                if (notifyCount > 32)
+                {
+                    m_log.InfoFormat(
+                        "[LAND]: More than {0} avatars own prims on this parcel.  Only sending back details of first {0}"
+                        + " - a developer might want to investigate whether this is a hard limit", 32);
+
+                    notifyCount = 32;
+                }
+
+                ParcelObjectOwnersReplyPacket.DataBlock[] dataBlock
+                    = new ParcelObjectOwnersReplyPacket.DataBlock[notifyCount];
+
+                int num = 0;
+                foreach (UUID owner in ownersAndCount.Keys)
+                {
+                    dataBlock[num] = new ParcelObjectOwnersReplyPacket.DataBlock();
+                    dataBlock[num].Count = ownersAndCount[owner];
+
+                    if (land.GroupID == owner || groups.Contains(owner))
+                        dataBlock[num].IsGroupOwned = true;
+
+                    dataBlock[num].OnlineStatus = true; //TODO: fix me later
+                    dataBlock[num].OwnerID = owner;
+
+                    num++;
+
+                    if (num >= notifyCount)
+                    {
+                        break;
+                    }
+                }
+
+                pack.Data = dataBlock;
+            }
+            pack.Header.Zerocoded = true;
+            this.OutPacket(pack, ThrottleOutPacketType.Task);
+        }
+
+        #endregion
+
+        #region Helper Methods
+
+        protected ImprovedTerseObjectUpdatePacket.ObjectDataBlock CreateImprovedTerseBlock(SendAvatarTerseData data)
+        {
+            return CreateImprovedTerseBlock(true, data.LocalID, 0, data.CollisionPlane, data.Position, data.Velocity,
+                data.Acceleration, data.Rotation, Vector3.Zero, data.TextureEntry);
+        }
+
+        protected ImprovedTerseObjectUpdatePacket.ObjectDataBlock CreateImprovedTerseBlock(SendPrimitiveTerseData data)
+        {
+            return CreateImprovedTerseBlock(false, data.LocalID, data.State, Vector4.Zero, data.Position, data.Velocity,
+                data.Acceleration, data.Rotation, data.AngularVelocity, data.TextureEntry);
+        }
+
+        protected ImprovedTerseObjectUpdatePacket.ObjectDataBlock CreateImprovedTerseBlock(bool avatar, uint localID, byte state,
+            Vector4 collisionPlane, Vector3 position, Vector3 velocity, Vector3 acceleration, Quaternion rotation,
+            Vector3 angularVelocity, byte[] textureEntry)
+        {
+            int pos = 0;
+            byte[] data = new byte[(avatar ? 60 : 44)];
+
+            // LocalID
+            Utils.UIntToBytes(localID, data, pos);
+            pos += 4;
+
+            // Avatar/CollisionPlane
+            data[pos++] = state;
+            if (avatar)
+            {
+                data[pos++] = 1;
+
+                if (collisionPlane == Vector4.Zero)
+                    collisionPlane = Vector4.UnitW;
+
+                collisionPlane.ToBytes(data, pos);
+                pos += 16;
+            }
+            else
+            {
+                ++pos;
+            }
+
+            // Position
+            position.ToBytes(data, pos);
+            pos += 12;
+
+            // Velocity
+            Utils.UInt16ToBytes(Utils.FloatToUInt16(velocity.X, -128.0f, 128.0f), data, pos); pos += 2;
+            Utils.UInt16ToBytes(Utils.FloatToUInt16(velocity.Y, -128.0f, 128.0f), data, pos); pos += 2;
+            Utils.UInt16ToBytes(Utils.FloatToUInt16(velocity.Z, -128.0f, 128.0f), data, pos); pos += 2;
+
+            // Acceleration
+            Utils.UInt16ToBytes(Utils.FloatToUInt16(acceleration.X, -64.0f, 64.0f), data, pos); pos += 2;
+            Utils.UInt16ToBytes(Utils.FloatToUInt16(acceleration.Y, -64.0f, 64.0f), data, pos); pos += 2;
+            Utils.UInt16ToBytes(Utils.FloatToUInt16(acceleration.Z, -64.0f, 64.0f), data, pos); pos += 2;
+
+            // Rotation
+            Utils.UInt16ToBytes(Utils.FloatToUInt16(rotation.X, -1.0f, 1.0f), data, pos); pos += 2;
+            Utils.UInt16ToBytes(Utils.FloatToUInt16(rotation.Y, -1.0f, 1.0f), data, pos); pos += 2;
+            Utils.UInt16ToBytes(Utils.FloatToUInt16(rotation.Z, -1.0f, 1.0f), data, pos); pos += 2;
+            Utils.UInt16ToBytes(Utils.FloatToUInt16(rotation.W, -1.0f, 1.0f), data, pos); pos += 2;
+
+            // Angular Velocity
+            Utils.UInt16ToBytes(Utils.FloatToUInt16(angularVelocity.X, -64.0f, 64.0f), data, pos); pos += 2;
+            Utils.UInt16ToBytes(Utils.FloatToUInt16(angularVelocity.Y, -64.0f, 64.0f), data, pos); pos += 2;
+            Utils.UInt16ToBytes(Utils.FloatToUInt16(angularVelocity.Z, -64.0f, 64.0f), data, pos); pos += 2;
+
+            ImprovedTerseObjectUpdatePacket.ObjectDataBlock block = new ImprovedTerseObjectUpdatePacket.ObjectDataBlock();
+            block.Data = data;
+
+            if (textureEntry != null && textureEntry.Length > 0)
+            {
+                byte[] teBytesFinal = new byte[textureEntry.Length + 4];
+
+                // Texture Length
+                Utils.IntToBytes(textureEntry.Length, textureEntry, 0);
+                // Texture
+                Buffer.BlockCopy(textureEntry, 0, teBytesFinal, 4, textureEntry.Length);
+
+                block.TextureEntry = teBytesFinal;
+            }
+            else
+            {
+                block.TextureEntry = Utils.EmptyBytes;
+            }
+
+            return block;
+        }
+
+        protected ObjectUpdatePacket.ObjectDataBlock CreateAvatarUpdateBlock(SendAvatarData data)
+        {
+            byte[] objectData = new byte[76];
+
+            Vector4.UnitW.ToBytes(objectData, 0); // TODO: Collision plane support
+            data.Position.ToBytes(objectData, 16);
+            //data.Velocity.ToBytes(objectData, 28);
+            //data.Acceleration.ToBytes(objectData, 40);
+            data.Rotation.ToBytes(objectData, 52);
+            //data.AngularVelocity.ToBytes(objectData, 64);
+
+            ObjectUpdatePacket.ObjectDataBlock update = new ObjectUpdatePacket.ObjectDataBlock();
+
+            update.Data = Utils.EmptyBytes;
+            update.ExtraParams = new byte[1];
+            update.FullID = data.AvatarID;
+            update.ID = data.AvatarLocalID;
+            update.Material = (byte)Material.Flesh;
+            update.MediaURL = Utils.EmptyBytes;
+            update.NameValue = Utils.StringToBytes("FirstName STRING RW SV " + data.FirstName + "\nLastName STRING RW SV " +
+                data.LastName + "\nTitle STRING RW SV " + data.GroupTitle);
+            update.ObjectData = objectData;
+            update.ParentID = data.ParentID;
+            update.PathCurve = 16;
+            update.PathScaleX = 100;
+            update.PathScaleY = 100;
+            update.PCode = (byte)PCode.Avatar;
+            update.ProfileCurve = 1;
+            update.PSBlock = Utils.EmptyBytes;
+            update.Scale = Vector3.One;
+            update.Text = Utils.EmptyBytes;
+            update.TextColor = new byte[4];
+            update.TextureAnim = Utils.EmptyBytes;
+            update.TextureEntry = data.TextureEntry ?? Utils.EmptyBytes;
+            update.UpdateFlags = 61 + (9 << 8) + (130 << 16) + (16 << 24); // TODO: Replace these numbers with PrimFlags
+
+            return update;
+        }
+
+        protected ObjectUpdatePacket.ObjectDataBlock CreatePrimUpdateBlock(SendPrimitiveData data)
+        {
+            byte[] objectData = new byte[60];
+            data.pos.ToBytes(objectData, 0);
+            data.vel.ToBytes(objectData, 12);
+            data.acc.ToBytes(objectData, 24);
+            data.rotation.ToBytes(objectData, 36);
+            data.rvel.ToBytes(objectData, 48);
+
+            ObjectUpdatePacket.ObjectDataBlock update = new ObjectUpdatePacket.ObjectDataBlock();
+            update.ClickAction = (byte)data.clickAction;
+            update.CRC = 0;
+            update.ExtraParams = data.primShape.ExtraParams ?? Utils.EmptyBytes;
+            update.FullID = data.objectID;
+            update.ID = data.localID;
+            //update.JointAxisOrAnchor = Vector3.Zero; // These are deprecated
+            //update.JointPivot = Vector3.Zero;
+            //update.JointType = 0;
+            update.Material = data.material;
+            update.MediaURL = Utils.EmptyBytes; // FIXME: Support this in OpenSim
+            if (data.attachment)
+            {
+                update.NameValue = Util.StringToBytes256("AttachItemID STRING RW SV " + data.AssetId);
+                update.State = (byte)((data.AttachPoint % 16) * 16 + (data.AttachPoint / 16));
+            }
+            else
+            {
+                update.NameValue = Utils.EmptyBytes;
+                update.State = data.primShape.State;
+            }
+            update.ObjectData = objectData;
+            update.ParentID = data.parentID;
+            update.PathBegin = data.primShape.PathBegin;
+            update.PathCurve = data.primShape.PathCurve;
+            update.PathEnd = data.primShape.PathEnd;
+            update.PathRadiusOffset = data.primShape.PathRadiusOffset;
+            update.PathRevolutions = data.primShape.PathRevolutions;
+            update.PathScaleX = data.primShape.PathScaleX;
+            update.PathScaleY = data.primShape.PathScaleY;
+            update.PathShearX = data.primShape.PathShearX;
+            update.PathShearY = data.primShape.PathShearY;
+            update.PathSkew = data.primShape.PathSkew;
+            update.PathTaperX = data.primShape.PathTaperX;
+            update.PathTaperY = data.primShape.PathTaperY;
+            update.PathTwist = data.primShape.PathTwist;
+            update.PathTwistBegin = data.primShape.PathTwistBegin;
+            update.PCode = data.primShape.PCode;
+            update.ProfileBegin = data.primShape.ProfileBegin;
+            update.ProfileCurve = data.primShape.ProfileCurve;
+            update.ProfileEnd = data.primShape.ProfileEnd;
+            update.ProfileHollow = data.primShape.ProfileHollow;
+            update.PSBlock = data.particleSystem ?? Utils.EmptyBytes;
+            update.TextColor = data.color ?? Color4.Black.GetBytes(true);
+            update.TextureAnim = data.textureanim ?? Utils.EmptyBytes;
+            update.TextureEntry = data.primShape.TextureEntry ?? Utils.EmptyBytes;
+            update.Scale = data.primShape.Scale;
+            update.Text = Util.StringToBytes256(data.text);
+            update.UpdateFlags = (uint)data.flags;
+
+            if (data.SoundId != UUID.Zero)
+            {
+                update.Sound = data.SoundId;
+                update.OwnerID = data.ownerID;
+                update.Gain = (float)data.SoundVolume;
+                update.Radius = (float)data.SoundRadius;
+                update.Flags = data.SoundFlags;
+            }
+
+            switch ((PCode)data.primShape.PCode)
+            {
+                case PCode.Grass:
+                case PCode.Tree:
+                case PCode.NewTree:
+                    update.Data = new byte[] { data.primShape.State };
+                    break;
+                default:
+                    // TODO: Support ScratchPad
+                    //if (prim.ScratchPad != null)
+                    //{
+                    //    update.Data = new byte[prim.ScratchPad.Length];
+                    //    Buffer.BlockCopy(prim.ScratchPad, 0, update.Data, 0, update.Data.Length);
+                    //}
+                    //else
+                    //{
+                    //    update.Data = Utils.EmptyBytes;
+                    //}
+                    update.Data = Utils.EmptyBytes;
+                    break;
+            }
+
+            return update;
+        }
+
+        public void SendNameReply(UUID profileId, string firstname, string lastname)
+        {
+            UUIDNameReplyPacket packet = (UUIDNameReplyPacket)PacketPool.Instance.GetPacket(PacketType.UUIDNameReply);
+            // TODO: don't create new blocks if recycling an old packet
+            packet.UUIDNameBlock = new UUIDNameReplyPacket.UUIDNameBlockBlock[1];
+            packet.UUIDNameBlock[0] = new UUIDNameReplyPacket.UUIDNameBlockBlock();
+            packet.UUIDNameBlock[0].ID = profileId;
+            packet.UUIDNameBlock[0].FirstName = Util.StringToBytes256(firstname);
+            packet.UUIDNameBlock[0].LastName = Util.StringToBytes256(lastname);
+
+            OutPacket(packet, ThrottleOutPacketType.Task);
+        }
+
+        public ulong GetGroupPowers(UUID groupID)
+        {
+            if (groupID == m_activeGroupID)
+                return m_activeGroupPowers;
+
+            if (m_groupPowers.ContainsKey(groupID))
+                return m_groupPowers[groupID];
+
+            return 0;
+        }
+
+        /// <summary>
+        /// This is a utility method used by single states to not duplicate kicks and blue card of death messages.
+        /// </summary>
+        public bool ChildAgentStatus()
+        {
+            return m_scene.PresenceChildStatus(AgentId);
+        }
+
+        #endregion
+
+        /// <summary>
+        /// This is a different way of processing packets then ProcessInPacket
+        /// </summary>
+        protected virtual void RegisterLocalPacketHandlers()
+        {
+            AddLocalPacketHandler(PacketType.LogoutRequest, Logout);
+            AddLocalPacketHandler(PacketType.AgentUpdate, HandleAgentUpdate);
+            AddLocalPacketHandler(PacketType.ViewerEffect, HandleViewerEffect);
+            AddLocalPacketHandler(PacketType.AgentCachedTexture, AgentTextureCached);
+            AddLocalPacketHandler(PacketType.MultipleObjectUpdate, MultipleObjUpdate);
+            AddLocalPacketHandler(PacketType.MoneyTransferRequest, HandleMoneyTransferRequest);
+            AddLocalPacketHandler(PacketType.ParcelBuy, HandleParcelBuyRequest);
+            AddLocalPacketHandler(PacketType.UUIDGroupNameRequest, HandleUUIDGroupNameRequest);
+            AddLocalPacketHandler(PacketType.ObjectGroup, HandleObjectGroupRequest);
+            AddLocalPacketHandler(PacketType.GenericMessage, HandleGenericMessage);
+        }
+
+        #region Packet Handlers
+
+        private bool HandleAgentUpdate(IClientAPI sener, Packet Pack)
+        {
+            if (OnAgentUpdate != null)
+            {
+                bool update = false;
+                AgentUpdatePacket agenUpdate = (AgentUpdatePacket)Pack;
+
+                #region Packet Session and User Check
+                if (agenUpdate.AgentData.SessionID != SessionId || agenUpdate.AgentData.AgentID != AgentId)
+                    return false;
+                #endregion
+
+                AgentUpdatePacket.AgentDataBlock x = agenUpdate.AgentData;
+
+                // We can only check when we have something to check
+                // against.
+
+                if (lastarg != null)
+                {
+                    update =
+                       (
+                        (x.BodyRotation != lastarg.BodyRotation) ||
+                        (x.CameraAtAxis != lastarg.CameraAtAxis) ||
+                        (x.CameraCenter != lastarg.CameraCenter) ||
+                        (x.CameraLeftAxis != lastarg.CameraLeftAxis) ||
+                        (x.CameraUpAxis != lastarg.CameraUpAxis) ||
+                        (x.ControlFlags != lastarg.ControlFlags) ||
+                        (x.Far != lastarg.Far) ||
+                        (x.Flags != lastarg.Flags) ||
+                        (x.State != lastarg.State) ||
+                        (x.HeadRotation != lastarg.HeadRotation) ||
+                        (x.SessionID != lastarg.SessionID) ||
+                        (x.AgentID != lastarg.AgentID)
+                       );
+                }
+                else
+                    update = true;
+
+                // These should be ordered from most-likely to
+                // least likely to change. I've made an initial
+                // guess at that.
+
+                if (update)
+                {
+                    AgentUpdateArgs arg = new AgentUpdateArgs();
+                    arg.AgentID = x.AgentID;
+                    arg.BodyRotation = x.BodyRotation;
+                    arg.CameraAtAxis = x.CameraAtAxis;
+                    arg.CameraCenter = x.CameraCenter;
+                    arg.CameraLeftAxis = x.CameraLeftAxis;
+                    arg.CameraUpAxis = x.CameraUpAxis;
+                    arg.ControlFlags = x.ControlFlags;
+                    arg.Far = x.Far;
+                    arg.Flags = x.Flags;
+                    arg.HeadRotation = x.HeadRotation;
+                    arg.SessionID = x.SessionID;
+                    arg.State = x.State;
+                    UpdateAgent handlerAgentUpdate = OnAgentUpdate;
+                    lastarg = arg; // save this set of arguments for nexttime
+                    if (handlerAgentUpdate != null)
+                        OnAgentUpdate(this, arg);
+
+                    handlerAgentUpdate = null;
+                }
+            }
+
+            return true;
+        }
+
+        private bool HandleMoneyTransferRequest(IClientAPI sender, Packet Pack)
+        {
+            MoneyTransferRequestPacket money = (MoneyTransferRequestPacket)Pack;
+            // validate the agent owns the agentID and sessionID
+            if (money.MoneyData.SourceID == sender.AgentId && money.AgentData.AgentID == sender.AgentId &&
+                money.AgentData.SessionID == sender.SessionId)
+            {
+                MoneyTransferRequest handlerMoneyTransferRequest = OnMoneyTransferRequest;
+                if (handlerMoneyTransferRequest != null)
+                {
+                    handlerMoneyTransferRequest(money.MoneyData.SourceID, money.MoneyData.DestID,
+                                                money.MoneyData.Amount, money.MoneyData.TransactionType,
+                                                Util.FieldToString(money.MoneyData.Description));
+                }
+
+                return true;
+            }
+
+            return false;
+        }
+
+        private bool HandleParcelBuyRequest(IClientAPI sender, Packet Pack)
+        {
+            ParcelBuyPacket parcel = (ParcelBuyPacket)Pack;
+            if (parcel.AgentData.AgentID == AgentId && parcel.AgentData.SessionID == SessionId)
+            {
+                ParcelBuy handlerParcelBuy = OnParcelBuy;
+                if (handlerParcelBuy != null)
+                {
+                    handlerParcelBuy(parcel.AgentData.AgentID, parcel.Data.GroupID, parcel.Data.Final,
+                                     parcel.Data.IsGroupOwned,
+                                     parcel.Data.RemoveContribution, parcel.Data.LocalID, parcel.ParcelData.Area,
+                                     parcel.ParcelData.Price,
+                                     false);
+                }
+                return true;
+            }
+            return false;
+        }
+
+        private bool HandleUUIDGroupNameRequest(IClientAPI sender, Packet Pack)
+        {
+            UUIDGroupNameRequestPacket upack = (UUIDGroupNameRequestPacket)Pack;
+
+
+            for (int i = 0; i < upack.UUIDNameBlock.Length; i++)
+            {
+                UUIDNameRequest handlerUUIDGroupNameRequest = OnUUIDGroupNameRequest;
+                if (handlerUUIDGroupNameRequest != null)
+                {
+                    handlerUUIDGroupNameRequest(upack.UUIDNameBlock[i].ID, this);
+                }
+            }
+
+            return true;
+        }
+
+        public bool HandleGenericMessage(IClientAPI sender, Packet pack)
+        {
+            GenericMessagePacket gmpack = (GenericMessagePacket)pack;
+            if (m_genericPacketHandlers.Count == 0) return false;
+            if (gmpack.AgentData.SessionID != SessionId) return false;
+
+            GenericMessage handlerGenericMessage = null;
+
+            string method = Util.FieldToString(gmpack.MethodData.Method).ToLower().Trim();
+
+            if (m_genericPacketHandlers.TryGetValue(method, out handlerGenericMessage))
+            {
+                List<string> msg = new List<string>();
+                List<byte[]> msgBytes = new List<byte[]>();
+
+                if (handlerGenericMessage != null)
+                {
+                    foreach (GenericMessagePacket.ParamListBlock block in gmpack.ParamList)
+                    {
+                        msg.Add(Util.FieldToString(block.Parameter));
+                        msgBytes.Add(block.Parameter);
+                    }
+                    try
+                    {
+                        if (OnBinaryGenericMessage != null)
+                        {
+                            OnBinaryGenericMessage(this, method, msgBytes.ToArray());
+                        }
+                        handlerGenericMessage(sender, method, msg);
+                        return true;
+                    }
+                    catch (Exception e)
+                    {
+                        m_log.Error("[GENERICMESSAGE] " + e);
+                    }
+                }
+            }
+            m_log.Error("[GENERICMESSAGE] Not handling GenericMessage with method-type of: " + method);
+            return false;
+        }
+
+        public bool HandleObjectGroupRequest(IClientAPI sender, Packet Pack)
+        {
+            ObjectGroupPacket ogpack = (ObjectGroupPacket)Pack;
+            if (ogpack.AgentData.SessionID != SessionId) return false;
+
+            RequestObjectPropertiesFamily handlerObjectGroupRequest = OnObjectGroupRequest;
+            if (handlerObjectGroupRequest != null)
+            {
+                for (int i = 0; i < ogpack.ObjectData.Length; i++)
+                {
+                    handlerObjectGroupRequest(this, ogpack.AgentData.GroupID, ogpack.ObjectData[i].ObjectLocalID, UUID.Zero);
+                }
+            }
+            return true;
+        }
+
+        private bool HandleViewerEffect(IClientAPI sender, Packet Pack)
+        {
+            ViewerEffectPacket viewer = (ViewerEffectPacket)Pack;
+            if (viewer.AgentData.SessionID != SessionId) return false;
+            ViewerEffectEventHandler handlerViewerEffect = OnViewerEffect;
+            if (handlerViewerEffect != null)
+            {
+                int length = viewer.Effect.Length;
+                List<ViewerEffectEventHandlerArg> args = new List<ViewerEffectEventHandlerArg>(length);
+                for (int i = 0; i < length; i++)
+                {
+                    //copy the effects block arguments into the event handler arg.
+                    ViewerEffectEventHandlerArg argument = new ViewerEffectEventHandlerArg();
+                    argument.AgentID = viewer.Effect[i].AgentID;
+                    argument.Color = viewer.Effect[i].Color;
+                    argument.Duration = viewer.Effect[i].Duration;
+                    argument.ID = viewer.Effect[i].ID;
+                    argument.Type = viewer.Effect[i].Type;
+                    argument.TypeData = viewer.Effect[i].TypeData;
+                    args.Add(argument);
+                }
+
+                handlerViewerEffect(sender, args);
+            }
+
+            return true;
+        }
+
+        #endregion Packet Handlers
+
+        public void SendScriptQuestion(UUID taskID, string taskName, string ownerName, UUID itemID, int question)
+        {
+            ScriptQuestionPacket scriptQuestion = (ScriptQuestionPacket)PacketPool.Instance.GetPacket(PacketType.ScriptQuestion);
+            scriptQuestion.Data = new ScriptQuestionPacket.DataBlock();
+            // TODO: don't create new blocks if recycling an old packet
+            scriptQuestion.Data.TaskID = taskID;
+            scriptQuestion.Data.ItemID = itemID;
+            scriptQuestion.Data.Questions = question;
+            scriptQuestion.Data.ObjectName = Util.StringToBytes256(taskName);
+            scriptQuestion.Data.ObjectOwner = Util.StringToBytes256(ownerName);
+
+            OutPacket(scriptQuestion, ThrottleOutPacketType.Task);
+        }
+
+        private void InitDefaultAnimations()
+        {
+            using (XmlTextReader reader = new XmlTextReader("data/avataranimations.xml"))
+            {
+                XmlDocument doc = new XmlDocument();
+                doc.Load(reader);
+                if (doc.DocumentElement != null)
+                    foreach (XmlNode nod in doc.DocumentElement.ChildNodes)
+                    {
+                        if (nod.Attributes["name"] != null)
+                        {
+                            string name = nod.Attributes["name"].Value.ToLower();
+                            string id = nod.InnerText;
+                            m_defaultAnimations.Add(name, (UUID)id);
+                        }
+                    }
+            }
+        }
+
+        public UUID GetDefaultAnimation(string name)
+        {
+            if (m_defaultAnimations.ContainsKey(name))
+                return m_defaultAnimations[name];
+            return UUID.Zero;
+        }
+
+        /// <summary>
+        /// Handler called when we receive a logout packet.
+        /// </summary>
+        /// <param name="client"></param>
+        /// <param name="packet"></param>
+        /// <returns></returns>
+        protected virtual bool Logout(IClientAPI client, Packet packet)
+        {
+            if (packet.Type == PacketType.LogoutRequest)
+            {
+                if (((LogoutRequestPacket)packet).AgentData.SessionID != SessionId) return false;
+            }
+
+            return Logout(client);
+        }
+
+        /// <summary>
+        ///
+        /// </summary>
+        /// <param name="client"></param>
+        /// <returns></returns>
+        protected virtual bool Logout(IClientAPI client)
+        {
+            m_log.InfoFormat("[CLIENT]: Got a logout request for {0} in {1}", Name, Scene.RegionInfo.RegionName);
+
+            Action<IClientAPI> handlerLogout = OnLogout;
+
+            if (handlerLogout != null)
+            {
+                handlerLogout(client);
+            }
+
+            return true;
+        }
+
+        /// <summary>
+        /// Send a response back to a client when it asks the asset server (via the region server) if it has
+        /// its appearance texture cached.
+        ///
+        /// At the moment, we always reply that there is no cached texture.
+        /// </summary>
+        /// <param name="simclient"></param>
+        /// <param name="packet"></param>
+        /// <returns></returns>
+        protected bool AgentTextureCached(IClientAPI simclient, Packet packet)
+        {
+            //m_log.Debug("texture cached: " + packet.ToString());
+            AgentCachedTexturePacket cachedtex = (AgentCachedTexturePacket)packet;
+            AgentCachedTextureResponsePacket cachedresp = (AgentCachedTextureResponsePacket)PacketPool.Instance.GetPacket(PacketType.AgentCachedTextureResponse);
+
+            if (cachedtex.AgentData.SessionID != SessionId) return false;
+
+            // TODO: don't create new blocks if recycling an old packet
+            cachedresp.AgentData.AgentID = AgentId;
+            cachedresp.AgentData.SessionID = m_sessionId;
+            cachedresp.AgentData.SerialNum = m_cachedTextureSerial;
+            m_cachedTextureSerial++;
+            cachedresp.WearableData =
+                new AgentCachedTextureResponsePacket.WearableDataBlock[cachedtex.WearableData.Length];
+
+            for (int i = 0; i < cachedtex.WearableData.Length; i++)
+            {
+                cachedresp.WearableData[i] = new AgentCachedTextureResponsePacket.WearableDataBlock();
+                cachedresp.WearableData[i].TextureIndex = cachedtex.WearableData[i].TextureIndex;
+                cachedresp.WearableData[i].TextureID = UUID.Zero;
+                cachedresp.WearableData[i].HostName = new byte[0];
+            }
+
+            cachedresp.Header.Zerocoded = true;
+            OutPacket(cachedresp, ThrottleOutPacketType.Task);
+
+            return true;
+        }
+
+        protected bool MultipleObjUpdate(IClientAPI simClient, Packet packet)
+        {
+            MultipleObjectUpdatePacket multipleupdate = (MultipleObjectUpdatePacket)packet;
+            if (multipleupdate.AgentData.SessionID != SessionId) return false;
+            // m_log.Debug("new multi update packet " + multipleupdate.ToString());
+            Scene tScene = (Scene)m_scene;
+
+            for (int i = 0; i < multipleupdate.ObjectData.Length; i++)
+            {
+                MultipleObjectUpdatePacket.ObjectDataBlock block = multipleupdate.ObjectData[i];
+
+                // Can't act on Null Data
+                if (block.Data != null)
+                {
+                    uint localId = block.ObjectLocalID;
+                    SceneObjectPart part = tScene.GetSceneObjectPart(localId);
+
+                    if (part == null)
+                    {
+                        // It's a ghost! tell the client to delete it from view.
+                        simClient.SendKillObject(Scene.RegionInfo.RegionHandle,
+                                                 localId);
+                    }
+                    else
+                    {
+                        // UUID partId = part.UUID;
+                        UpdatePrimGroupRotation handlerUpdatePrimGroupRotation;
+
+                        switch (block.Type)
+                        {
+                            case 1:
+                                Vector3 pos1 = new Vector3(block.Data, 0);
+
+                                UpdateVector handlerUpdatePrimSinglePosition = OnUpdatePrimSinglePosition;
+                                if (handlerUpdatePrimSinglePosition != null)
+                                {
+                                    // m_log.Debug("new movement position is " + pos.X + " , " + pos.Y + " , " + pos.Z);
+                                    handlerUpdatePrimSinglePosition(localId, pos1, this);
+                                }
+                                break;
+                            case 2:
+                                Quaternion rot1 = new Quaternion(block.Data, 0, true);
+
+                                UpdatePrimSingleRotation handlerUpdatePrimSingleRotation = OnUpdatePrimSingleRotation;
+                                if (handlerUpdatePrimSingleRotation != null)
+                                {
+                                    // m_log.Info("new tab rotation is " + rot1.X + " , " + rot1.Y + " , " + rot1.Z + " , " + rot1.W);
+                                    handlerUpdatePrimSingleRotation(localId, rot1, this);
+                                }
+                                break;
+                            case 3:
+                                Vector3 rotPos = new Vector3(block.Data, 0);
+                                Quaternion rot2 = new Quaternion(block.Data, 12, true);
+
+                                UpdatePrimSingleRotationPosition handlerUpdatePrimSingleRotationPosition = OnUpdatePrimSingleRotationPosition;
+                                if (handlerUpdatePrimSingleRotationPosition != null)
+                                {
+                                    // m_log.Debug("new mouse rotation position is " + rotPos.X + " , " + rotPos.Y + " , " + rotPos.Z);
+                                    // m_log.Info("new mouse rotation is " + rot2.X + " , " + rot2.Y + " , " + rot2.Z + " , " + rot2.W);
+                                    handlerUpdatePrimSingleRotationPosition(localId, rot2, rotPos, this);
+                                }
+                                break;
+                            case 4:
+                            case 20:
+                                Vector3 scale4 = new Vector3(block.Data, 0);
+
+                                UpdateVector handlerUpdatePrimScale = OnUpdatePrimScale;
+                                if (handlerUpdatePrimScale != null)
+                                {
+                                    //                                     m_log.Debug("new scale is " + scale4.X + " , " + scale4.Y + " , " + scale4.Z);
+                                    handlerUpdatePrimScale(localId, scale4, this);
+                                }
+                                break;
+                            case 5:
+
+                                Vector3 scale1 = new Vector3(block.Data, 12);
+                                Vector3 pos11 = new Vector3(block.Data, 0);
+
+                                handlerUpdatePrimScale = OnUpdatePrimScale;
+                                if (handlerUpdatePrimScale != null)
+                                {
+                                    // m_log.Debug("new scale is " + scale.X + " , " + scale.Y + " , " + scale.Z);
+                                    handlerUpdatePrimScale(localId, scale1, this);
+
+                                    handlerUpdatePrimSinglePosition = OnUpdatePrimSinglePosition;
+                                    if (handlerUpdatePrimSinglePosition != null)
+                                    {
+                                        handlerUpdatePrimSinglePosition(localId, pos11, this);
+                                    }
+                                }
+                                break;
+                            case 9:
+                                Vector3 pos2 = new Vector3(block.Data, 0);
+
+                                UpdateVector handlerUpdateVector = OnUpdatePrimGroupPosition;
+
+                                if (handlerUpdateVector != null)
+                                {
+
+                                    handlerUpdateVector(localId, pos2, this);
+                                }
+                                break;
+                            case 10:
+                                Quaternion rot3 = new Quaternion(block.Data, 0, true);
+
+                                UpdatePrimRotation handlerUpdatePrimRotation = OnUpdatePrimGroupRotation;
+                                if (handlerUpdatePrimRotation != null)
+                                {
+                                    //  Console.WriteLine("new rotation is " + rot3.X + " , " + rot3.Y + " , " + rot3.Z + " , " + rot3.W);
+                                    handlerUpdatePrimRotation(localId, rot3, this);
+                                }
+                                break;
+                            case 11:
+                                Vector3 pos3 = new Vector3(block.Data, 0);
+                                Quaternion rot4 = new Quaternion(block.Data, 12, true);
+
+                                handlerUpdatePrimGroupRotation = OnUpdatePrimGroupMouseRotation;
+                                if (handlerUpdatePrimGroupRotation != null)
+                                {
+                                    //  m_log.Debug("new rotation position is " + pos.X + " , " + pos.Y + " , " + pos.Z);
+                                    // m_log.Debug("new group mouse rotation is " + rot4.X + " , " + rot4.Y + " , " + rot4.Z + " , " + rot4.W);
+                                    handlerUpdatePrimGroupRotation(localId, pos3, rot4, this);
+                                }
+                                break;
+                            case 12:
+                            case 28:
+                                Vector3 scale7 = new Vector3(block.Data, 0);
+
+                                UpdateVector handlerUpdatePrimGroupScale = OnUpdatePrimGroupScale;
+                                if (handlerUpdatePrimGroupScale != null)
+                                {
+                                    //                                     m_log.Debug("new scale is " + scale7.X + " , " + scale7.Y + " , " + scale7.Z);
+                                    handlerUpdatePrimGroupScale(localId, scale7, this);
+                                }
+                                break;
+                            case 13:
+                                Vector3 scale2 = new Vector3(block.Data, 12);
+                                Vector3 pos4 = new Vector3(block.Data, 0);
+
+                                handlerUpdatePrimScale = OnUpdatePrimScale;
+                                if (handlerUpdatePrimScale != null)
+                                {
+                                    //m_log.Debug("new scale is " + scale.X + " , " + scale.Y + " , " + scale.Z);
+                                    handlerUpdatePrimScale(localId, scale2, this);
+
+                                    // Change the position based on scale (for bug number 246)
+                                    handlerUpdatePrimSinglePosition = OnUpdatePrimSinglePosition;
+                                    // m_log.Debug("new movement position is " + pos.X + " , " + pos.Y + " , " + pos.Z);
+                                    if (handlerUpdatePrimSinglePosition != null)
+                                    {
+                                        handlerUpdatePrimSinglePosition(localId, pos4, this);
+                                    }
+                                }
+                                break;
+                            case 29:
+                                Vector3 scale5 = new Vector3(block.Data, 12);
+                                Vector3 pos5 = new Vector3(block.Data, 0);
+
+                                handlerUpdatePrimGroupScale = OnUpdatePrimGroupScale;
+                                if (handlerUpdatePrimGroupScale != null)
+                                {
+                                    // m_log.Debug("new scale is " + scale.X + " , " + scale.Y + " , " + scale.Z);
+                                    handlerUpdatePrimGroupScale(localId, scale5, this);
+                                    handlerUpdateVector = OnUpdatePrimGroupPosition;
+
+                                    if (handlerUpdateVector != null)
+                                    {
+                                        handlerUpdateVector(localId, pos5, this);
+                                    }
+                                }
+                                break;
+                            case 21:
+                                Vector3 scale6 = new Vector3(block.Data, 12);
+                                Vector3 pos6 = new Vector3(block.Data, 0);
+
+                                handlerUpdatePrimScale = OnUpdatePrimScale;
+                                if (handlerUpdatePrimScale != null)
+                                {
+                                    // m_log.Debug("new scale is " + scale.X + " , " + scale.Y + " , " + scale.Z);
+                                    handlerUpdatePrimScale(localId, scale6, this);
+                                    handlerUpdatePrimSinglePosition = OnUpdatePrimSinglePosition;
+                                    if (handlerUpdatePrimSinglePosition != null)
+                                    {
+                                        handlerUpdatePrimSinglePosition(localId, pos6, this);
+                                    }
+                                }
+                                break;
+                            default:
+                                m_log.Debug("[CLIENT] MultipleObjUpdate recieved an unknown packet type: " + (block.Type));
+                                break;
+                        }
+                    }
+                }
+            }
+            return true;
+        }
+
+        public void RequestMapLayer()
+        {
+            //should be getting the map layer from the grid server
+            //send a layer covering the 800,800 - 1200,1200 area (should be covering the requested area)
+            MapLayerReplyPacket mapReply = (MapLayerReplyPacket)PacketPool.Instance.GetPacket(PacketType.MapLayerReply);
+            // TODO: don't create new blocks if recycling an old packet
+            mapReply.AgentData.AgentID = AgentId;
+            mapReply.AgentData.Flags = 0;
+            mapReply.LayerData = new MapLayerReplyPacket.LayerDataBlock[1];
+            mapReply.LayerData[0] = new MapLayerReplyPacket.LayerDataBlock();
+            mapReply.LayerData[0].Bottom = 0;
+            mapReply.LayerData[0].Left = 0;
+            mapReply.LayerData[0].Top = 30000;
+            mapReply.LayerData[0].Right = 30000;
+            mapReply.LayerData[0].ImageID = new UUID("00000000-0000-1111-9999-000000000006");
+            mapReply.Header.Zerocoded = true;
+            OutPacket(mapReply, ThrottleOutPacketType.Land);
+        }
+
+        public void RequestMapBlocksX(int minX, int minY, int maxX, int maxY)
+        {
+            /*
+            IList simMapProfiles = m_gridServer.RequestMapBlocks(minX, minY, maxX, maxY);
+            MapBlockReplyPacket mbReply = new MapBlockReplyPacket();
+            mbReply.AgentData.AgentId = AgentId;
+            int len;
+            if (simMapProfiles == null)
+                len = 0;
+            else
+                len = simMapProfiles.Count;
+
+            mbReply.Data = new MapBlockReplyPacket.DataBlock[len];
+            int iii;
+            for (iii = 0; iii < len; iii++)
+            {
+                Hashtable mp = (Hashtable)simMapProfiles[iii];
+                mbReply.Data[iii] = new MapBlockReplyPacket.DataBlock();
+                mbReply.Data[iii].Name = Util.UTF8.GetBytes((string)mp["name"]);
+                mbReply.Data[iii].Access = System.Convert.ToByte(mp["access"]);
+                mbReply.Data[iii].Agents = System.Convert.ToByte(mp["agents"]);
+                mbReply.Data[iii].MapImageID = new UUID((string)mp["map-image-id"]);
+                mbReply.Data[iii].RegionFlags = System.Convert.ToUInt32(mp["region-flags"]);
+                mbReply.Data[iii].WaterHeight = System.Convert.ToByte(mp["water-height"]);
+                mbReply.Data[iii].X = System.Convert.ToUInt16(mp["x"]);
+                mbReply.Data[iii].Y = System.Convert.ToUInt16(mp["y"]);
+            }
+            this.OutPacket(mbReply, ThrottleOutPacketType.Land);
+             */
+        }
+
+        /// <summary>
+        /// Sets the throttles from values supplied by the client
+        /// </summary>
+        /// <param name="throttles"></param>
+        public void SetChildAgentThrottle(byte[] throttles)
+        {
+            m_udpClient.SetThrottles(throttles);
+        }
+
+        /// <summary>
+        /// Get the current throttles for this client as a packed byte array
+        /// </summary>
+        /// <param name="multiplier">Unused</param>
+        /// <returns></returns>
+        public byte[] GetThrottlesPacked(float multiplier)
+        {
+            return m_udpClient.GetThrottlesPacked();
+        }
+
+        /// <summary>
+        /// Cruft?
+        /// </summary>
+        public virtual void InPacket(object NewPack)
+        {
+            throw new NotImplementedException();
+        }
+
+        /// <summary>
+        /// This is the starting point for sending a simulator packet out to the client
+        /// </summary>
+        /// <param name="packet">Packet to send</param>
+        /// <param name="throttlePacketType">Throttling category for the packet</param>
+        private void OutPacket(Packet packet, ThrottleOutPacketType throttlePacketType)
+        {
+            m_udpServer.SendPacket(m_udpClient, packet, throttlePacketType, true);
+        }
+
+        public bool AddMoney(int debit)
+        {
+            if (m_moneyBalance + debit >= 0)
+            {
+                m_moneyBalance += debit;
+                SendMoneyBalance(UUID.Zero, true, Util.StringToBytes256("Poof Poof!"), m_moneyBalance);
+                return true;
+            }
+            return false;
+        }
+
+        /// <summary>
+        /// Breaks down the genericMessagePacket into specific events
+        /// </summary>
+        /// <param name="gmMethod"></param>
+        /// <param name="gmInvoice"></param>
+        /// <param name="gmParams"></param>
+        public void DecipherGenericMessage(string gmMethod, UUID gmInvoice, GenericMessagePacket.ParamListBlock[] gmParams)
+        {
+            switch (gmMethod)
+            {
+                case "autopilot":
+                    float locx;
+                    float locy;
+                    float locz;
+
+                    try
+                    {
+                        uint regionX;
+                        uint regionY;
+                        Utils.LongToUInts(Scene.RegionInfo.RegionHandle, out regionX, out regionY);
+                        locx = Convert.ToSingle(Utils.BytesToString(gmParams[0].Parameter)) - regionX;
+                        locy = Convert.ToSingle(Utils.BytesToString(gmParams[1].Parameter)) - regionY;
+                        locz = Convert.ToSingle(Utils.BytesToString(gmParams[2].Parameter));
+                    }
+                    catch (InvalidCastException)
+                    {
+                        m_log.Error("[CLIENT]: Invalid autopilot request");
+                        return;
+                    }
+
+                    UpdateVector handlerAutoPilotGo = OnAutoPilotGo;
+                    if (handlerAutoPilotGo != null)
+                    {
+                        handlerAutoPilotGo(0, new Vector3(locx, locy, locz), this);
+                    }
+                    m_log.InfoFormat("[CLIENT]: Client Requests autopilot to position <{0},{1},{2}>", locx, locy, locz);
+
+
+                    break;
+                default:
+                    m_log.Debug("[CLIENT]: Unknown Generic Message, Method: " + gmMethod + ". Invoice: " + gmInvoice + ".  Dumping Params:");
+                    for (int hi = 0; hi < gmParams.Length; hi++)
+                    {
+                        Console.WriteLine(gmParams[hi].ToString());
+                    }
+                    //gmpack.MethodData.
+                    break;
+
+            }
+        }
+
+        /// <summary>
+        /// Entryway from the client to the simulator.  All UDP packets from the client will end up here
+        /// </summary>
+        /// <param name="Pack">OpenMetaverse.packet</param>
+        public void ProcessInPacket(Packet Pack)
+        {
+
+            if (ProcessPacketMethod(Pack))
+            {
+                return;
+            }
+
+            const bool m_checkPackets = true;
+
+            // Main packet processing conditional
+            switch (Pack.Type)
+            {
+                #region Scene/Avatar
+
+                case PacketType.AvatarPropertiesRequest:
+                    AvatarPropertiesRequestPacket avatarProperties = (AvatarPropertiesRequestPacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (avatarProperties.AgentData.SessionID != SessionId ||
+                            avatarProperties.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    RequestAvatarProperties handlerRequestAvatarProperties = OnRequestAvatarProperties;
+                    if (handlerRequestAvatarProperties != null)
+                    {
+                        handlerRequestAvatarProperties(this, avatarProperties.AgentData.AvatarID);
+                    }
+
+                    break;
+
+                case PacketType.ChatFromViewer:
+                    ChatFromViewerPacket inchatpack = (ChatFromViewerPacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (inchatpack.AgentData.SessionID != SessionId ||
+                            inchatpack.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    string fromName = String.Empty; //ClientAvatar.firstname + " " + ClientAvatar.lastname;
+                    byte[] message = inchatpack.ChatData.Message;
+                    byte type = inchatpack.ChatData.Type;
+                    Vector3 fromPos = new Vector3(); // ClientAvatar.Pos;
+                    // UUID fromAgentID = AgentId;
+
+                    int channel = inchatpack.ChatData.Channel;
+
+                    if (OnChatFromClient != null)
+                    {
+                        OSChatMessage args = new OSChatMessage();
+                        args.Channel = channel;
+                        args.From = fromName;
+                        args.Message = Utils.BytesToString(message);
+                        args.Type = (ChatTypeEnum)type;
+                        args.Position = fromPos;
+
+                        args.Scene = Scene;
+                        args.Sender = this;
+                        args.SenderUUID = this.AgentId;
+
+                        ChatMessage handlerChatFromClient = OnChatFromClient;
+                        if (handlerChatFromClient != null)
+                            handlerChatFromClient(this, args);
+                    }
+                    break;
+
+                case PacketType.AvatarPropertiesUpdate:
+                    AvatarPropertiesUpdatePacket avatarProps = (AvatarPropertiesUpdatePacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (avatarProps.AgentData.SessionID != SessionId ||
+                            avatarProps.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    UpdateAvatarProperties handlerUpdateAvatarProperties = OnUpdateAvatarProperties;
+                    if (handlerUpdateAvatarProperties != null)
+                    {
+                        AvatarPropertiesUpdatePacket.PropertiesDataBlock Properties = avatarProps.PropertiesData;
+                        UserProfileData UserProfile = new UserProfileData();
+                        UserProfile.ID = AgentId;
+                        UserProfile.AboutText = Utils.BytesToString(Properties.AboutText);
+                        UserProfile.FirstLifeAboutText = Utils.BytesToString(Properties.FLAboutText);
+                        UserProfile.FirstLifeImage = Properties.FLImageID;
+                        UserProfile.Image = Properties.ImageID;
+                        UserProfile.ProfileUrl = Utils.BytesToString(Properties.ProfileURL);
+
+                        handlerUpdateAvatarProperties(this, UserProfile);
+                    }
+                    break;
+
+                case PacketType.ScriptDialogReply:
+                    ScriptDialogReplyPacket rdialog = (ScriptDialogReplyPacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (rdialog.AgentData.SessionID != SessionId ||
+                            rdialog.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    int ch = rdialog.Data.ChatChannel;
+                    byte[] msg = rdialog.Data.ButtonLabel;
+                    if (OnChatFromClient != null)
+                    {
+                        OSChatMessage args = new OSChatMessage();
+                        args.Channel = ch;
+                        args.From = String.Empty;
+                        args.Message = Utils.BytesToString(msg);
+                        args.Type = ChatTypeEnum.Shout;
+                        args.Position = new Vector3();
+                        args.Scene = Scene;
+                        args.Sender = this;
+                        ChatMessage handlerChatFromClient2 = OnChatFromClient;
+                        if (handlerChatFromClient2 != null)
+                            handlerChatFromClient2(this, args);
+                    }
+
+                    break;
+
+                case PacketType.ImprovedInstantMessage:
+                    ImprovedInstantMessagePacket msgpack = (ImprovedInstantMessagePacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (msgpack.AgentData.SessionID != SessionId ||
+                            msgpack.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    string IMfromName = Util.FieldToString(msgpack.MessageBlock.FromAgentName);
+                    string IMmessage = Utils.BytesToString(msgpack.MessageBlock.Message);
+                    ImprovedInstantMessage handlerInstantMessage = OnInstantMessage;
+
+                    if (handlerInstantMessage != null)
+                    {
+                        GridInstantMessage im = new GridInstantMessage(Scene,
+                                msgpack.AgentData.AgentID,
+                                IMfromName,
+                                msgpack.MessageBlock.ToAgentID,
+                                msgpack.MessageBlock.Dialog,
+                                msgpack.MessageBlock.FromGroup,
+                                IMmessage,
+                                msgpack.MessageBlock.ID,
+                                msgpack.MessageBlock.Offline != 0 ? true : false,
+                                msgpack.MessageBlock.Position,
+                                msgpack.MessageBlock.BinaryBucket);
+
+                        handlerInstantMessage(this, im);
+                    }
+                    break;
+
+                case PacketType.AcceptFriendship:
+                    AcceptFriendshipPacket afriendpack = (AcceptFriendshipPacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (afriendpack.AgentData.SessionID != SessionId ||
+                            afriendpack.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    // My guess is this is the folder to stick the calling card into
+                    List<UUID> callingCardFolders = new List<UUID>();
+
+                    UUID agentID = afriendpack.AgentData.AgentID;
+                    UUID transactionID = afriendpack.TransactionBlock.TransactionID;
+
+                    for (int fi = 0; fi < afriendpack.FolderData.Length; fi++)
+                    {
+                        callingCardFolders.Add(afriendpack.FolderData[fi].FolderID);
+                    }
+
+                    FriendActionDelegate handlerApproveFriendRequest = OnApproveFriendRequest;
+                    if (handlerApproveFriendRequest != null)
+                    {
+                        handlerApproveFriendRequest(this, agentID, transactionID, callingCardFolders);
+                    }
+                    break;
+
+                case PacketType.DeclineFriendship:
+                    DeclineFriendshipPacket dfriendpack = (DeclineFriendshipPacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (dfriendpack.AgentData.SessionID != SessionId ||
+                            dfriendpack.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    if (OnDenyFriendRequest != null)
+                    {
+                        OnDenyFriendRequest(this,
+                                            dfriendpack.AgentData.AgentID,
+                                            dfriendpack.TransactionBlock.TransactionID,
+                                            null);
+                    }
+                    break;
+
+                case PacketType.TerminateFriendship:
+                    TerminateFriendshipPacket tfriendpack = (TerminateFriendshipPacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (tfriendpack.AgentData.SessionID != SessionId ||
+                            tfriendpack.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    UUID listOwnerAgentID = tfriendpack.AgentData.AgentID;
+                    UUID exFriendID = tfriendpack.ExBlock.OtherID;
+
+                    FriendshipTermination handlerTerminateFriendship = OnTerminateFriendship;
+                    if (handlerTerminateFriendship != null)
+                    {
+                        handlerTerminateFriendship(this, listOwnerAgentID, exFriendID);
+                    }
+                    break;
+
+                case PacketType.RezObject:
+                    RezObjectPacket rezPacket = (RezObjectPacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (rezPacket.AgentData.SessionID != SessionId ||
+                            rezPacket.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    RezObject handlerRezObject = OnRezObject;
+                    if (handlerRezObject != null)
+                    {
+                        handlerRezObject(this, rezPacket.InventoryData.ItemID, rezPacket.RezData.RayEnd,
+                                         rezPacket.RezData.RayStart, rezPacket.RezData.RayTargetID,
+                                         rezPacket.RezData.BypassRaycast, rezPacket.RezData.RayEndIsIntersection,
+                                         rezPacket.RezData.RezSelected, rezPacket.RezData.RemoveItem,
+                                         rezPacket.RezData.FromTaskID);
+                    }
+                    break;
+
+                case PacketType.DeRezObject:
+                    DeRezObjectPacket DeRezPacket = (DeRezObjectPacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (DeRezPacket.AgentData.SessionID != SessionId ||
+                            DeRezPacket.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    DeRezObject handlerDeRezObject = OnDeRezObject;
+                    if (handlerDeRezObject != null)
+                    {
+                        List<uint> deRezIDs = new List<uint>();
+
+                        foreach (DeRezObjectPacket.ObjectDataBlock data in
+                            DeRezPacket.ObjectData)
+                        {
+                            deRezIDs.Add(data.ObjectLocalID);
+                        }
+                        // It just so happens that the values on the DeRezAction enumerator match the Destination
+                        // values given by a Second Life client
+                        handlerDeRezObject(this, deRezIDs,
+                                           DeRezPacket.AgentBlock.GroupID,
+                                           (DeRezAction)DeRezPacket.AgentBlock.Destination,
+                                           DeRezPacket.AgentBlock.DestinationID);
+
+                    }
+                    break;
+
+                case PacketType.ModifyLand:
+                    ModifyLandPacket modify = (ModifyLandPacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (modify.AgentData.SessionID != SessionId ||
+                            modify.AgentData.AgentID != AgentId)
+                            break;
+                    }
+
+                    #endregion
+                    //m_log.Info("[LAND]: LAND:" + modify.ToString());
+                    if (modify.ParcelData.Length > 0)
+                    {
+                        if (OnModifyTerrain != null)
+                        {
+                            for (int i = 0; i < modify.ParcelData.Length; i++)
+                            {
+                                ModifyTerrain handlerModifyTerrain = OnModifyTerrain;
+                                if (handlerModifyTerrain != null)
+                                {
+                                    handlerModifyTerrain(AgentId, modify.ModifyBlock.Height, modify.ModifyBlock.Seconds,
+                                                         modify.ModifyBlock.BrushSize,
+                                                         modify.ModifyBlock.Action, modify.ParcelData[i].North,
+                                                         modify.ParcelData[i].West, modify.ParcelData[i].South,
+                                                         modify.ParcelData[i].East, AgentId);
+                                }
+                            }
+                        }
+                    }
+
+                    break;
+
+                case PacketType.RegionHandshakeReply:
+
+                    Action<IClientAPI> handlerRegionHandShakeReply = OnRegionHandShakeReply;
+                    if (handlerRegionHandShakeReply != null)
+                    {
+                        handlerRegionHandShakeReply(this);
+                    }
+
+                    break;
+
+                case PacketType.AgentWearablesRequest:
+                    GenericCall2 handlerRequestWearables = OnRequestWearables;
+
+                    if (handlerRequestWearables != null)
+                    {
+                        handlerRequestWearables();
+                    }
+
+                    Action<IClientAPI> handlerRequestAvatarsData = OnRequestAvatarsData;
+
+                    if (handlerRequestAvatarsData != null)
+                    {
+                        handlerRequestAvatarsData(this);
+                    }
+
+                    break;
+
+                case PacketType.AgentSetAppearance:
+                    AgentSetAppearancePacket appear = (AgentSetAppearancePacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (appear.AgentData.SessionID != SessionId ||
+                            appear.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    SetAppearance handlerSetAppearance = OnSetAppearance;
+                    if (handlerSetAppearance != null)
+                    {
+                        // Temporarily protect ourselves from the mantis #951 failure.
+                        // However, we could do this for several other handlers where a failure isn't terminal
+                        // for the client session anyway, in order to protect ourselves against bad code in plugins
+                        try
+                        {
+                            byte[] visualparams = new byte[appear.VisualParam.Length];
+                            for (int i = 0; i < appear.VisualParam.Length; i++)
+                                visualparams[i] = appear.VisualParam[i].ParamValue;
+
+                            Primitive.TextureEntry te = null;
+                            if (appear.ObjectData.TextureEntry.Length > 1)
+                                te = new Primitive.TextureEntry(appear.ObjectData.TextureEntry, 0, appear.ObjectData.TextureEntry.Length);
+
+                            handlerSetAppearance(te, visualparams);
+                        }
+                        catch (Exception e)
+                        {
+                            m_log.ErrorFormat(
+                                "[CLIENT VIEW]: AgentSetApperance packet handler threw an exception, {0}",
+                                e);
+                        }
+                    }
+
+                    break;
+
+                case PacketType.AgentIsNowWearing:
+                    if (OnAvatarNowWearing != null)
+                    {
+                        AgentIsNowWearingPacket nowWearing = (AgentIsNowWearingPacket)Pack;
+
+                        #region Packet Session and User Check
+                        if (m_checkPackets)
+                        {
+                            if (nowWearing.AgentData.SessionID != SessionId ||
+                                nowWearing.AgentData.AgentID != AgentId)
+                                break;
+                        }
+                        #endregion
+
+                        AvatarWearingArgs wearingArgs = new AvatarWearingArgs();
+                        for (int i = 0; i < nowWearing.WearableData.Length; i++)
+                        {
+                            AvatarWearingArgs.Wearable wearable =
+                                new AvatarWearingArgs.Wearable(nowWearing.WearableData[i].ItemID,
+                                                               nowWearing.WearableData[i].WearableType);
+                            wearingArgs.NowWearing.Add(wearable);
+                        }
+
+                        AvatarNowWearing handlerAvatarNowWearing = OnAvatarNowWearing;
+                        if (handlerAvatarNowWearing != null)
+                        {
+                            handlerAvatarNowWearing(this, wearingArgs);
+                        }
+                    }
+                    break;
+
+                case PacketType.RezSingleAttachmentFromInv:
+                    RezSingleAttachmentFromInv handlerRezSingleAttachment = OnRezSingleAttachmentFromInv;
+                    if (handlerRezSingleAttachment != null)
+                    {
+                        RezSingleAttachmentFromInvPacket rez = (RezSingleAttachmentFromInvPacket)Pack;
+
+                        #region Packet Session and User Check
+                        if (m_checkPackets)
+                        {
+                            if (rez.AgentData.SessionID != SessionId ||
+                                rez.AgentData.AgentID != AgentId)
+                                break;
+                        }
+                        #endregion
+
+                        handlerRezSingleAttachment(this, rez.ObjectData.ItemID,
+                                                   rez.ObjectData.AttachmentPt);
+                    }
+
+                    break;
+
+                case PacketType.RezMultipleAttachmentsFromInv:
+                    RezMultipleAttachmentsFromInv handlerRezMultipleAttachments = OnRezMultipleAttachmentsFromInv;
+                    if (handlerRezMultipleAttachments != null)
+                    {
+                        RezMultipleAttachmentsFromInvPacket rez = (RezMultipleAttachmentsFromInvPacket)Pack;
+                        handlerRezMultipleAttachments(this, rez.HeaderData,
+                                                      rez.ObjectData);
+                    }
+
+                    break;
+
+                case PacketType.DetachAttachmentIntoInv:
+                    UUIDNameRequest handlerDetachAttachmentIntoInv = OnDetachAttachmentIntoInv;
+                    if (handlerDetachAttachmentIntoInv != null)
+                    {
+                        DetachAttachmentIntoInvPacket detachtoInv = (DetachAttachmentIntoInvPacket)Pack;
+
+                        #region Packet Session and User Check
+                        // UNSUPPORTED ON THIS PACKET
+                        #endregion
+
+                        UUID itemID = detachtoInv.ObjectData.ItemID;
+                        // UUID ATTACH_agentID = detachtoInv.ObjectData.AgentID;
+
+                        handlerDetachAttachmentIntoInv(itemID, this);
+                    }
+                    break;
+
+                case PacketType.ObjectAttach:
+                    if (OnObjectAttach != null)
+                    {
+                        ObjectAttachPacket att = (ObjectAttachPacket)Pack;
+
+                        #region Packet Session and User Check
+                        if (m_checkPackets)
+                        {
+                            if (att.AgentData.SessionID != SessionId ||
+                                att.AgentData.AgentID != AgentId)
+                                break;
+                        }
+                        #endregion
+
+                        ObjectAttach handlerObjectAttach = OnObjectAttach;
+
+                        if (handlerObjectAttach != null)
+                        {
+                            if (att.ObjectData.Length > 0)
+                            {
+                                handlerObjectAttach(this, att.ObjectData[0].ObjectLocalID, att.AgentData.AttachmentPoint, att.ObjectData[0].Rotation, false);
+                            }
+                        }
+                    }
+                    break;
+
+                case PacketType.ObjectDetach:
+                    ObjectDetachPacket dett = (ObjectDetachPacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (dett.AgentData.SessionID != SessionId ||
+                            dett.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    for (int j = 0; j < dett.ObjectData.Length; j++)
+                    {
+                        uint obj = dett.ObjectData[j].ObjectLocalID;
+                        ObjectDeselect handlerObjectDetach = OnObjectDetach;
+                        if (handlerObjectDetach != null)
+                        {
+                            handlerObjectDetach(obj, this);
+                        }
+
+                    }
+                    break;
+
+                case PacketType.ObjectDrop:
+                    ObjectDropPacket dropp = (ObjectDropPacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (dropp.AgentData.SessionID != SessionId ||
+                            dropp.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    for (int j = 0; j < dropp.ObjectData.Length; j++)
+                    {
+                        uint obj = dropp.ObjectData[j].ObjectLocalID;
+                        ObjectDrop handlerObjectDrop = OnObjectDrop;
+                        if (handlerObjectDrop != null)
+                        {
+                            handlerObjectDrop(obj, this);
+                        }
+                    }
+                    break;
+
+                case PacketType.SetAlwaysRun:
+                    SetAlwaysRunPacket run = (SetAlwaysRunPacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (run.AgentData.SessionID != SessionId ||
+                            run.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    SetAlwaysRun handlerSetAlwaysRun = OnSetAlwaysRun;
+                    if (handlerSetAlwaysRun != null)
+                        handlerSetAlwaysRun(this, run.AgentData.AlwaysRun);
+
+                    break;
+
+                case PacketType.CompleteAgentMovement:
+                    GenericCall2 handlerCompleteMovementToRegion = OnCompleteMovementToRegion;
+                    if (handlerCompleteMovementToRegion != null)
+                    {
+                        handlerCompleteMovementToRegion();
+                    }
+                    handlerCompleteMovementToRegion = null;
+
+                    break;
+
+                case PacketType.AgentAnimation:
+                    AgentAnimationPacket AgentAni = (AgentAnimationPacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (AgentAni.AgentData.SessionID != SessionId ||
+                            AgentAni.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    StartAnim handlerStartAnim = null;
+                    StopAnim handlerStopAnim = null;
+
+                    for (int i = 0; i < AgentAni.AnimationList.Length; i++)
+                    {
+                        if (AgentAni.AnimationList[i].StartAnim)
+                        {
+                            handlerStartAnim = OnStartAnim;
+                            if (handlerStartAnim != null)
+                            {
+                                handlerStartAnim(this, AgentAni.AnimationList[i].AnimID);
+                            }
+                        }
+                        else
+                        {
+                            handlerStopAnim = OnStopAnim;
+                            if (handlerStopAnim != null)
+                            {
+                                handlerStopAnim(this, AgentAni.AnimationList[i].AnimID);
+                            }
+                        }
+                    }
+                    break;
+
+                case PacketType.AgentRequestSit:
+                    if (OnAgentRequestSit != null)
+                    {
+                        AgentRequestSitPacket agentRequestSit = (AgentRequestSitPacket)Pack;
+
+                        #region Packet Session and User Check
+                        if (m_checkPackets)
+                        {
+                            if (agentRequestSit.AgentData.SessionID != SessionId ||
+                                agentRequestSit.AgentData.AgentID != AgentId)
+                                break;
+                        }
+                        #endregion
+
+                        AgentRequestSit handlerAgentRequestSit = OnAgentRequestSit;
+                        if (handlerAgentRequestSit != null)
+                            handlerAgentRequestSit(this, agentRequestSit.AgentData.AgentID,
+                                                   agentRequestSit.TargetObject.TargetID, agentRequestSit.TargetObject.Offset);
+                    }
+                    break;
+
+                case PacketType.AgentSit:
+                    if (OnAgentSit != null)
+                    {
+                        AgentSitPacket agentSit = (AgentSitPacket)Pack;
+
+                        #region Packet Session and User Check
+                        if (m_checkPackets)
+                        {
+                            if (agentSit.AgentData.SessionID != SessionId ||
+                                agentSit.AgentData.AgentID != AgentId)
+                                break;
+                        }
+                        #endregion
+
+                        AgentSit handlerAgentSit = OnAgentSit;
+                        if (handlerAgentSit != null)
+                        {
+                            OnAgentSit(this, agentSit.AgentData.AgentID);
+                        }
+                    }
+                    break;
+
+                case PacketType.SoundTrigger:
+                    SoundTriggerPacket soundTriggerPacket = (SoundTriggerPacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        // UNSUPPORTED ON THIS PACKET
+                    }
+                    #endregion
+
+                    SoundTrigger handlerSoundTrigger = OnSoundTrigger;
+                    if (handlerSoundTrigger != null)
+                    {
+                        handlerSoundTrigger(soundTriggerPacket.SoundData.SoundID, soundTriggerPacket.SoundData.OwnerID,
+                            soundTriggerPacket.SoundData.ObjectID, soundTriggerPacket.SoundData.ParentID,
+                            soundTriggerPacket.SoundData.Gain, soundTriggerPacket.SoundData.Position,
+                            soundTriggerPacket.SoundData.Handle);
+
+                    }
+                    break;
+
+                case PacketType.AvatarPickerRequest:
+                    AvatarPickerRequestPacket avRequestQuery = (AvatarPickerRequestPacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (avRequestQuery.AgentData.SessionID != SessionId ||
+                            avRequestQuery.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    AvatarPickerRequestPacket.AgentDataBlock Requestdata = avRequestQuery.AgentData;
+                    AvatarPickerRequestPacket.DataBlock querydata = avRequestQuery.Data;
+                    //m_log.Debug("Agent Sends:" + Utils.BytesToString(querydata.Name));
+
+                    AvatarPickerRequest handlerAvatarPickerRequest = OnAvatarPickerRequest;
+                    if (handlerAvatarPickerRequest != null)
+                    {
+                        handlerAvatarPickerRequest(this, Requestdata.AgentID, Requestdata.QueryID,
+                                                   Utils.BytesToString(querydata.Name));
+                    }
+                    break;
+
+                case PacketType.AgentDataUpdateRequest:
+                    AgentDataUpdateRequestPacket avRequestDataUpdatePacket = (AgentDataUpdateRequestPacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (avRequestDataUpdatePacket.AgentData.SessionID != SessionId ||
+                            avRequestDataUpdatePacket.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    FetchInventory handlerAgentDataUpdateRequest = OnAgentDataUpdateRequest;
+
+                    if (handlerAgentDataUpdateRequest != null)
+                    {
+                        handlerAgentDataUpdateRequest(this, avRequestDataUpdatePacket.AgentData.AgentID, avRequestDataUpdatePacket.AgentData.SessionID);
+                    }
+
+                    break;
+
+                case PacketType.UserInfoRequest:
+                    UserInfoRequest handlerUserInfoRequest = OnUserInfoRequest;
+                    if (handlerUserInfoRequest != null)
+                    {
+                        handlerUserInfoRequest(this);
+                    }
+                    else
+                    {
+                        SendUserInfoReply(false, true, "");
+                    }
+                    break;
+
+                case PacketType.UpdateUserInfo:
+                    UpdateUserInfoPacket updateUserInfo = (UpdateUserInfoPacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (updateUserInfo.AgentData.SessionID != SessionId ||
+                            updateUserInfo.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    UpdateUserInfo handlerUpdateUserInfo = OnUpdateUserInfo;
+                    if (handlerUpdateUserInfo != null)
+                    {
+                        bool visible = true;
+                        string DirectoryVisibility =
+                                Utils.BytesToString(updateUserInfo.UserData.DirectoryVisibility);
+                        if (DirectoryVisibility == "hidden")
+                            visible = false;
+
+                        handlerUpdateUserInfo(
+                                updateUserInfo.UserData.IMViaEMail,
+                                visible, this);
+                    }
+                    break;
+
+                case PacketType.SetStartLocationRequest:
+                    SetStartLocationRequestPacket avSetStartLocationRequestPacket = (SetStartLocationRequestPacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (avSetStartLocationRequestPacket.AgentData.SessionID != SessionId ||
+                            avSetStartLocationRequestPacket.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    if (avSetStartLocationRequestPacket.AgentData.AgentID == AgentId && avSetStartLocationRequestPacket.AgentData.SessionID == SessionId)
+                    {
+                        TeleportLocationRequest handlerSetStartLocationRequest = OnSetStartLocationRequest;
+                        if (handlerSetStartLocationRequest != null)
+                        {
+                            handlerSetStartLocationRequest(this, 0, avSetStartLocationRequestPacket.StartLocationData.LocationPos,
+                                                           avSetStartLocationRequestPacket.StartLocationData.LocationLookAt,
+                                                           avSetStartLocationRequestPacket.StartLocationData.LocationID);
+                        }
+                    }
+                    break;
+
+                case PacketType.AgentThrottle:
+                    AgentThrottlePacket atpack = (AgentThrottlePacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (atpack.AgentData.SessionID != SessionId ||
+                            atpack.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    m_udpClient.SetThrottles(atpack.Throttle.Throttles);
+                    break;
+
+                case PacketType.AgentPause:
+                    m_udpClient.IsPaused = true;
+                    break;
+
+                case PacketType.AgentResume:
+                    m_udpClient.IsPaused = false;
+                    SendStartPingCheck(m_udpClient.CurrentPingSequence++);
+
+                    break;
+
+                case PacketType.ForceScriptControlRelease:
+                    ForceReleaseControls handlerForceReleaseControls = OnForceReleaseControls;
+                    if (handlerForceReleaseControls != null)
+                    {
+                        handlerForceReleaseControls(this, AgentId);
+                    }
+                    break;
+
+                #endregion
+
+                #region Objects/m_sceneObjects
+
+                case PacketType.ObjectLink:
+                    ObjectLinkPacket link = (ObjectLinkPacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (link.AgentData.SessionID != SessionId ||
+                            link.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    uint parentprimid = 0;
+                    List<uint> childrenprims = new List<uint>();
+                    if (link.ObjectData.Length > 1)
+                    {
+                        parentprimid = link.ObjectData[0].ObjectLocalID;
+
+                        for (int i = 1; i < link.ObjectData.Length; i++)
+                        {
+                            childrenprims.Add(link.ObjectData[i].ObjectLocalID);
+                        }
+                    }
+                    LinkObjects handlerLinkObjects = OnLinkObjects;
+                    if (handlerLinkObjects != null)
+                    {
+                        handlerLinkObjects(this, parentprimid, childrenprims);
+                    }
+                    break;
+
+                case PacketType.ObjectDelink:
+                    ObjectDelinkPacket delink = (ObjectDelinkPacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (delink.AgentData.SessionID != SessionId ||
+                            delink.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    // It appears the prim at index 0 is not always the root prim (for
+                    // instance, when one prim of a link set has been edited independently
+                    // of the others).  Therefore, we'll pass all the ids onto the delink
+                    // method for it to decide which is the root.
+                    List<uint> prims = new List<uint>();
+                    for (int i = 0; i < delink.ObjectData.Length; i++)
+                    {
+                        prims.Add(delink.ObjectData[i].ObjectLocalID);
+                    }
+                    DelinkObjects handlerDelinkObjects = OnDelinkObjects;
+                    if (handlerDelinkObjects != null)
+                    {
+                        handlerDelinkObjects(prims);
+                    }
+
+                    break;
+
+                case PacketType.ObjectAdd:
+                    if (OnAddPrim != null)
+                    {
+                        ObjectAddPacket addPacket = (ObjectAddPacket)Pack;
+
+                        #region Packet Session and User Check
+                        if (m_checkPackets)
+                        {
+                            if (addPacket.AgentData.SessionID != SessionId ||
+                                addPacket.AgentData.AgentID != AgentId)
+                                break;
+                        }
+                        #endregion
+
+                        PrimitiveBaseShape shape = GetShapeFromAddPacket(addPacket);
+                        // m_log.Info("[REZData]: " + addPacket.ToString());
+                        //BypassRaycast: 1
+                        //RayStart: <69.79469, 158.2652, 98.40343>
+                        //RayEnd: <61.97724, 141.995, 92.58341>
+                        //RayTargetID: 00000000-0000-0000-0000-000000000000
+
+                        //Check to see if adding the prim is allowed; useful for any module wanting to restrict the
+                        //object from rezing initially
+
+                        AddNewPrim handlerAddPrim = OnAddPrim;
+                        if (handlerAddPrim != null)
+                            handlerAddPrim(AgentId, ActiveGroupId, addPacket.ObjectData.RayEnd, addPacket.ObjectData.Rotation, shape, addPacket.ObjectData.BypassRaycast, addPacket.ObjectData.RayStart, addPacket.ObjectData.RayTargetID, addPacket.ObjectData.RayEndIsIntersection);
+                    }
+                    break;
+
+                case PacketType.ObjectShape:
+                    ObjectShapePacket shapePacket = (ObjectShapePacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (shapePacket.AgentData.SessionID != SessionId ||
+                            shapePacket.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    UpdateShape handlerUpdatePrimShape = null;
+                    for (int i = 0; i < shapePacket.ObjectData.Length; i++)
+                    {
+                        handlerUpdatePrimShape = OnUpdatePrimShape;
+                        if (handlerUpdatePrimShape != null)
+                        {
+                            UpdateShapeArgs shapeData = new UpdateShapeArgs();
+                            shapeData.ObjectLocalID = shapePacket.ObjectData[i].ObjectLocalID;
+                            shapeData.PathBegin = shapePacket.ObjectData[i].PathBegin;
+                            shapeData.PathCurve = shapePacket.ObjectData[i].PathCurve;
+                            shapeData.PathEnd = shapePacket.ObjectData[i].PathEnd;
+                            shapeData.PathRadiusOffset = shapePacket.ObjectData[i].PathRadiusOffset;
+                            shapeData.PathRevolutions = shapePacket.ObjectData[i].PathRevolutions;
+                            shapeData.PathScaleX = shapePacket.ObjectData[i].PathScaleX;
+                            shapeData.PathScaleY = shapePacket.ObjectData[i].PathScaleY;
+                            shapeData.PathShearX = shapePacket.ObjectData[i].PathShearX;
+                            shapeData.PathShearY = shapePacket.ObjectData[i].PathShearY;
+                            shapeData.PathSkew = shapePacket.ObjectData[i].PathSkew;
+                            shapeData.PathTaperX = shapePacket.ObjectData[i].PathTaperX;
+                            shapeData.PathTaperY = shapePacket.ObjectData[i].PathTaperY;
+                            shapeData.PathTwist = shapePacket.ObjectData[i].PathTwist;
+                            shapeData.PathTwistBegin = shapePacket.ObjectData[i].PathTwistBegin;
+                            shapeData.ProfileBegin = shapePacket.ObjectData[i].ProfileBegin;
+                            shapeData.ProfileCurve = shapePacket.ObjectData[i].ProfileCurve;
+                            shapeData.ProfileEnd = shapePacket.ObjectData[i].ProfileEnd;
+                            shapeData.ProfileHollow = shapePacket.ObjectData[i].ProfileHollow;
+
+                            handlerUpdatePrimShape(m_agentId, shapePacket.ObjectData[i].ObjectLocalID,
+                                                   shapeData);
+                        }
+                    }
+                    break;
+
+                case PacketType.ObjectExtraParams:
+                    ObjectExtraParamsPacket extraPar = (ObjectExtraParamsPacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (extraPar.AgentData.SessionID != SessionId ||
+                            extraPar.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    ObjectExtraParams handlerUpdateExtraParams = OnUpdateExtraParams;
+                    if (handlerUpdateExtraParams != null)
+                    {
+                        for (int i = 0; i < extraPar.ObjectData.Length; i++)
+                        {
+                            handlerUpdateExtraParams(m_agentId, extraPar.ObjectData[i].ObjectLocalID,
+                                                     extraPar.ObjectData[i].ParamType,
+                                                     extraPar.ObjectData[i].ParamInUse, extraPar.ObjectData[i].ParamData);
+                        }
+                    }
+                    break;
+                case PacketType.ObjectDuplicate:
+                    ObjectDuplicatePacket dupe = (ObjectDuplicatePacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (dupe.AgentData.SessionID != SessionId ||
+                            dupe.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    ObjectDuplicatePacket.AgentDataBlock AgentandGroupData = dupe.AgentData;
+
+                    ObjectDuplicate handlerObjectDuplicate = null;
+
+                    for (int i = 0; i < dupe.ObjectData.Length; i++)
+                    {
+                        handlerObjectDuplicate = OnObjectDuplicate;
+                        if (handlerObjectDuplicate != null)
+                        {
+                            handlerObjectDuplicate(dupe.ObjectData[i].ObjectLocalID, dupe.SharedData.Offset,
+                                                   dupe.SharedData.DuplicateFlags, AgentandGroupData.AgentID,
+                                                   AgentandGroupData.GroupID);
+                        }
+                    }
+
+                    break;
+
+                case PacketType.RequestMultipleObjects:
+                    RequestMultipleObjectsPacket incomingRequest = (RequestMultipleObjectsPacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (incomingRequest.AgentData.SessionID != SessionId ||
+                            incomingRequest.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    ObjectRequest handlerObjectRequest = null;
+
+                    for (int i = 0; i < incomingRequest.ObjectData.Length; i++)
+                    {
+                        handlerObjectRequest = OnObjectRequest;
+                        if (handlerObjectRequest != null)
+                        {
+                            handlerObjectRequest(incomingRequest.ObjectData[i].ID, this);
+                        }
+                    }
+                    break;
+                case PacketType.ObjectSelect:
+                    ObjectSelectPacket incomingselect = (ObjectSelectPacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (incomingselect.AgentData.SessionID != SessionId ||
+                            incomingselect.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    ObjectSelect handlerObjectSelect = null;
+
+                    for (int i = 0; i < incomingselect.ObjectData.Length; i++)
+                    {
+                        handlerObjectSelect = OnObjectSelect;
+                        if (handlerObjectSelect != null)
+                        {
+                            handlerObjectSelect(incomingselect.ObjectData[i].ObjectLocalID, this);
+                        }
+                    }
+                    break;
+                case PacketType.ObjectDeselect:
+                    ObjectDeselectPacket incomingdeselect = (ObjectDeselectPacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (incomingdeselect.AgentData.SessionID != SessionId ||
+                            incomingdeselect.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    ObjectDeselect handlerObjectDeselect = null;
+
+                    for (int i = 0; i < incomingdeselect.ObjectData.Length; i++)
+                    {
+                        handlerObjectDeselect = OnObjectDeselect;
+                        if (handlerObjectDeselect != null)
+                        {
+                            OnObjectDeselect(incomingdeselect.ObjectData[i].ObjectLocalID, this);
+                        }
+                    }
+                    break;
+                case PacketType.ObjectPosition:
+                    // DEPRECATED: but till libsecondlife removes it, people will use it
+                    ObjectPositionPacket position = (ObjectPositionPacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (position.AgentData.SessionID != SessionId ||
+                            position.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+
+                    for (int i = 0; i < position.ObjectData.Length; i++)
+                    {
+                        UpdateVector handlerUpdateVector = OnUpdatePrimGroupPosition;
+                        if (handlerUpdateVector != null)
+                            handlerUpdateVector(position.ObjectData[i].ObjectLocalID, position.ObjectData[i].Position, this);
+                    }
+
+                    break;
+                case PacketType.ObjectScale:
+                    // DEPRECATED: but till libsecondlife removes it, people will use it
+                    ObjectScalePacket scale = (ObjectScalePacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (scale.AgentData.SessionID != SessionId ||
+                            scale.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    for (int i = 0; i < scale.ObjectData.Length; i++)
+                    {
+                        UpdateVector handlerUpdatePrimGroupScale = OnUpdatePrimGroupScale;
+                        if (handlerUpdatePrimGroupScale != null)
+                            handlerUpdatePrimGroupScale(scale.ObjectData[i].ObjectLocalID, scale.ObjectData[i].Scale, this);
+                    }
+
+                    break;
+                case PacketType.ObjectRotation:
+                    // DEPRECATED: but till libsecondlife removes it, people will use it
+                    ObjectRotationPacket rotation = (ObjectRotationPacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (rotation.AgentData.SessionID != SessionId ||
+                            rotation.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    for (int i = 0; i < rotation.ObjectData.Length; i++)
+                    {
+                        UpdatePrimRotation handlerUpdatePrimRotation = OnUpdatePrimGroupRotation;
+                        if (handlerUpdatePrimRotation != null)
+                            handlerUpdatePrimRotation(rotation.ObjectData[i].ObjectLocalID, rotation.ObjectData[i].Rotation, this);
+                    }
+
+                    break;
+                case PacketType.ObjectFlagUpdate:
+                    ObjectFlagUpdatePacket flags = (ObjectFlagUpdatePacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (flags.AgentData.SessionID != SessionId ||
+                            flags.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    UpdatePrimFlags handlerUpdatePrimFlags = OnUpdatePrimFlags;
+
+                    if (handlerUpdatePrimFlags != null)
+                    {
+                        byte[] data = Pack.ToBytes();
+                        // 46,47,48 are special positions within the packet
+                        // This may change so perhaps we need a better way
+                        // of storing this (OMV.FlagUpdatePacket.UsePhysics,etc?)
+                        bool UsePhysics = (data[46] != 0) ? true : false;
+                        bool IsTemporary = (data[47] != 0) ? true : false;
+                        bool IsPhantom = (data[48] != 0) ? true : false;
+                        handlerUpdatePrimFlags(flags.AgentData.ObjectLocalID, UsePhysics, IsTemporary, IsPhantom, this);
+                    }
+                    break;
+                case PacketType.ObjectImage:
+                    ObjectImagePacket imagePack = (ObjectImagePacket)Pack;
+
+                    UpdatePrimTexture handlerUpdatePrimTexture = null;
+                    for (int i = 0; i < imagePack.ObjectData.Length; i++)
+                    {
+                        handlerUpdatePrimTexture = OnUpdatePrimTexture;
+                        if (handlerUpdatePrimTexture != null)
+                        {
+                            handlerUpdatePrimTexture(imagePack.ObjectData[i].ObjectLocalID,
+                                                     imagePack.ObjectData[i].TextureEntry, this);
+                        }
+                    }
+                    break;
+                case PacketType.ObjectGrab:
+                    ObjectGrabPacket grab = (ObjectGrabPacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (grab.AgentData.SessionID != SessionId ||
+                            grab.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    GrabObject handlerGrabObject = OnGrabObject;
+
+                    if (handlerGrabObject != null)
+                    {
+                        List<SurfaceTouchEventArgs> touchArgs = new List<SurfaceTouchEventArgs>();
+                        if ((grab.SurfaceInfo != null) && (grab.SurfaceInfo.Length > 0))
+                        {
+                            foreach (ObjectGrabPacket.SurfaceInfoBlock surfaceInfo in grab.SurfaceInfo)
+                            {
+                                SurfaceTouchEventArgs arg = new SurfaceTouchEventArgs();
+                                arg.Binormal = surfaceInfo.Binormal;
+                                arg.FaceIndex = surfaceInfo.FaceIndex;
+                                arg.Normal = surfaceInfo.Normal;
+                                arg.Position = surfaceInfo.Position;
+                                arg.STCoord = surfaceInfo.STCoord;
+                                arg.UVCoord = surfaceInfo.UVCoord;
+                                touchArgs.Add(arg);
+                            }
+                        }
+                        handlerGrabObject(grab.ObjectData.LocalID, grab.ObjectData.GrabOffset, this, touchArgs);
+                    }
+                    break;
+                case PacketType.ObjectGrabUpdate:
+                    ObjectGrabUpdatePacket grabUpdate = (ObjectGrabUpdatePacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (grabUpdate.AgentData.SessionID != SessionId ||
+                            grabUpdate.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    MoveObject handlerGrabUpdate = OnGrabUpdate;
+
+                    if (handlerGrabUpdate != null)
+                    {
+                        List<SurfaceTouchEventArgs> touchArgs = new List<SurfaceTouchEventArgs>();
+                        if ((grabUpdate.SurfaceInfo != null) && (grabUpdate.SurfaceInfo.Length > 0))
+                        {
+                            foreach (ObjectGrabUpdatePacket.SurfaceInfoBlock surfaceInfo in grabUpdate.SurfaceInfo)
+                            {
+                                SurfaceTouchEventArgs arg = new SurfaceTouchEventArgs();
+                                arg.Binormal = surfaceInfo.Binormal;
+                                arg.FaceIndex = surfaceInfo.FaceIndex;
+                                arg.Normal = surfaceInfo.Normal;
+                                arg.Position = surfaceInfo.Position;
+                                arg.STCoord = surfaceInfo.STCoord;
+                                arg.UVCoord = surfaceInfo.UVCoord;
+                                touchArgs.Add(arg);
+                            }
+                        }
+                        handlerGrabUpdate(grabUpdate.ObjectData.ObjectID, grabUpdate.ObjectData.GrabOffsetInitial,
+                                          grabUpdate.ObjectData.GrabPosition, this, touchArgs);
+                    }
+                    break;
+                case PacketType.ObjectDeGrab:
+                    ObjectDeGrabPacket deGrab = (ObjectDeGrabPacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (deGrab.AgentData.SessionID != SessionId ||
+                            deGrab.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    DeGrabObject handlerDeGrabObject = OnDeGrabObject;
+                    if (handlerDeGrabObject != null)
+                    {
+                        List<SurfaceTouchEventArgs> touchArgs = new List<SurfaceTouchEventArgs>();
+                        if ((deGrab.SurfaceInfo != null) && (deGrab.SurfaceInfo.Length > 0))
+                        {
+                            foreach (ObjectDeGrabPacket.SurfaceInfoBlock surfaceInfo in deGrab.SurfaceInfo)
+                            {
+                                SurfaceTouchEventArgs arg = new SurfaceTouchEventArgs();
+                                arg.Binormal = surfaceInfo.Binormal;
+                                arg.FaceIndex = surfaceInfo.FaceIndex;
+                                arg.Normal = surfaceInfo.Normal;
+                                arg.Position = surfaceInfo.Position;
+                                arg.STCoord = surfaceInfo.STCoord;
+                                arg.UVCoord = surfaceInfo.UVCoord;
+                                touchArgs.Add(arg);
+                            }
+                        }
+                        handlerDeGrabObject(deGrab.ObjectData.LocalID, this, touchArgs);
+                    }
+                    break;
+                case PacketType.ObjectSpinStart:
+                    //m_log.Warn("[CLIENT]: unhandled ObjectSpinStart packet");
+                    ObjectSpinStartPacket spinStart = (ObjectSpinStartPacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (spinStart.AgentData.SessionID != SessionId ||
+                            spinStart.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    SpinStart handlerSpinStart = OnSpinStart;
+                    if (handlerSpinStart != null)
+                    {
+                        handlerSpinStart(spinStart.ObjectData.ObjectID, this);
+                    }
+                    break;
+                case PacketType.ObjectSpinUpdate:
+                    //m_log.Warn("[CLIENT]: unhandled ObjectSpinUpdate packet");
+                    ObjectSpinUpdatePacket spinUpdate = (ObjectSpinUpdatePacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (spinUpdate.AgentData.SessionID != SessionId ||
+                            spinUpdate.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    Vector3 axis;
+                    float angle;
+                    spinUpdate.ObjectData.Rotation.GetAxisAngle(out axis, out angle);
+                    //m_log.Warn("[CLIENT]: ObjectSpinUpdate packet rot axis:" + axis + " angle:" + angle);
+
+                    SpinObject handlerSpinUpdate = OnSpinUpdate;
+                    if (handlerSpinUpdate != null)
+                    {
+                        handlerSpinUpdate(spinUpdate.ObjectData.ObjectID, spinUpdate.ObjectData.Rotation, this);
+                    }
+                    break;
+                case PacketType.ObjectSpinStop:
+                    //m_log.Warn("[CLIENT]: unhandled ObjectSpinStop packet");
+                    ObjectSpinStopPacket spinStop = (ObjectSpinStopPacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (spinStop.AgentData.SessionID != SessionId ||
+                            spinStop.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    SpinStop handlerSpinStop = OnSpinStop;
+                    if (handlerSpinStop != null)
+                    {
+                        handlerSpinStop(spinStop.ObjectData.ObjectID, this);
+                    }
+                    break;
+
+                case PacketType.ObjectDescription:
+                    ObjectDescriptionPacket objDes = (ObjectDescriptionPacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (objDes.AgentData.SessionID != SessionId ||
+                            objDes.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    GenericCall7 handlerObjectDescription = null;
+
+                    for (int i = 0; i < objDes.ObjectData.Length; i++)
+                    {
+                        handlerObjectDescription = OnObjectDescription;
+                        if (handlerObjectDescription != null)
+                        {
+                            handlerObjectDescription(this, objDes.ObjectData[i].LocalID,
+                                                     Util.FieldToString(objDes.ObjectData[i].Description));
+                        }
+                    }
+                    break;
+                case PacketType.ObjectName:
+                    ObjectNamePacket objName = (ObjectNamePacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (objName.AgentData.SessionID != SessionId ||
+                            objName.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    GenericCall7 handlerObjectName = null;
+                    for (int i = 0; i < objName.ObjectData.Length; i++)
+                    {
+                        handlerObjectName = OnObjectName;
+                        if (handlerObjectName != null)
+                        {
+                            handlerObjectName(this, objName.ObjectData[i].LocalID,
+                                              Util.FieldToString(objName.ObjectData[i].Name));
+                        }
+                    }
+                    break;
+                case PacketType.ObjectPermissions:
+                    if (OnObjectPermissions != null)
+                    {
+                        ObjectPermissionsPacket newobjPerms = (ObjectPermissionsPacket)Pack;
+
+                        #region Packet Session and User Check
+                        if (m_checkPackets)
+                        {
+                            if (newobjPerms.AgentData.SessionID != SessionId ||
+                                newobjPerms.AgentData.AgentID != AgentId)
+                                break;
+                        }
+                        #endregion
+
+                        UUID AgentID = newobjPerms.AgentData.AgentID;
+                        UUID SessionID = newobjPerms.AgentData.SessionID;
+
+                        ObjectPermissions handlerObjectPermissions = null;
+
+                        for (int i = 0; i < newobjPerms.ObjectData.Length; i++)
+                        {
+                            ObjectPermissionsPacket.ObjectDataBlock permChanges = newobjPerms.ObjectData[i];
+
+                            byte field = permChanges.Field;
+                            uint localID = permChanges.ObjectLocalID;
+                            uint mask = permChanges.Mask;
+                            byte set = permChanges.Set;
+
+                            handlerObjectPermissions = OnObjectPermissions;
+
+                            if (handlerObjectPermissions != null)
+                                handlerObjectPermissions(this, AgentID, SessionID, field, localID, mask, set);
+                        }
+                    }
+
+                    // Here's our data,
+                    // PermField contains the field the info goes into
+                    // PermField determines which mask we're changing
+                    //
+                    // chmask is the mask of the change
+                    // setTF is whether we're adding it or taking it away
+                    //
+                    // objLocalID is the localID of the object.
+
+                    // Unfortunately, we have to pass the event the packet because objData is an array
+                    // That means multiple object perms may be updated in a single packet.
+
+                    break;
+
+                case PacketType.Undo:
+                    UndoPacket undoitem = (UndoPacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (undoitem.AgentData.SessionID != SessionId ||
+                            undoitem.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    if (undoitem.ObjectData.Length > 0)
+                    {
+                        for (int i = 0; i < undoitem.ObjectData.Length; i++)
+                        {
+                            UUID objiD = undoitem.ObjectData[i].ObjectID;
+                            AgentSit handlerOnUndo = OnUndo;
+                            if (handlerOnUndo != null)
+                            {
+                                handlerOnUndo(this, objiD);
+                            }
+
+                        }
+                    }
+                    break;
+                case PacketType.ObjectDuplicateOnRay:
+                    ObjectDuplicateOnRayPacket dupeOnRay = (ObjectDuplicateOnRayPacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (dupeOnRay.AgentData.SessionID != SessionId ||
+                            dupeOnRay.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    ObjectDuplicateOnRay handlerObjectDuplicateOnRay = null;
+
+                    for (int i = 0; i < dupeOnRay.ObjectData.Length; i++)
+                    {
+                        handlerObjectDuplicateOnRay = OnObjectDuplicateOnRay;
+                        if (handlerObjectDuplicateOnRay != null)
+                        {
+                            handlerObjectDuplicateOnRay(dupeOnRay.ObjectData[i].ObjectLocalID, dupeOnRay.AgentData.DuplicateFlags,
+                                                        dupeOnRay.AgentData.AgentID, dupeOnRay.AgentData.GroupID, dupeOnRay.AgentData.RayTargetID, dupeOnRay.AgentData.RayEnd,
+                                                        dupeOnRay.AgentData.RayStart, dupeOnRay.AgentData.BypassRaycast, dupeOnRay.AgentData.RayEndIsIntersection,
+                                                        dupeOnRay.AgentData.CopyCenters, dupeOnRay.AgentData.CopyRotates);
+                        }
+                    }
+
+                    break;
+                case PacketType.RequestObjectPropertiesFamily:
+                    //This powers the little tooltip that appears when you move your mouse over an object
+                    RequestObjectPropertiesFamilyPacket packToolTip = (RequestObjectPropertiesFamilyPacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (packToolTip.AgentData.SessionID != SessionId ||
+                            packToolTip.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    RequestObjectPropertiesFamilyPacket.ObjectDataBlock packObjBlock = packToolTip.ObjectData;
+
+                    RequestObjectPropertiesFamily handlerRequestObjectPropertiesFamily = OnRequestObjectPropertiesFamily;
+
+                    if (handlerRequestObjectPropertiesFamily != null)
+                    {
+                        handlerRequestObjectPropertiesFamily(this, m_agentId, packObjBlock.RequestFlags,
+                                                             packObjBlock.ObjectID);
+                    }
+
+                    break;
+                case PacketType.ObjectIncludeInSearch:
+                    //This lets us set objects to appear in search (stuff like DataSnapshot, etc)
+                    ObjectIncludeInSearchPacket packInSearch = (ObjectIncludeInSearchPacket)Pack;
+                    ObjectIncludeInSearch handlerObjectIncludeInSearch = null;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (packInSearch.AgentData.SessionID != SessionId ||
+                            packInSearch.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    foreach (ObjectIncludeInSearchPacket.ObjectDataBlock objData in packInSearch.ObjectData)
+                    {
+                        bool inSearch = objData.IncludeInSearch;
+                        uint localID = objData.ObjectLocalID;
+
+                        handlerObjectIncludeInSearch = OnObjectIncludeInSearch;
+
+                        if (handlerObjectIncludeInSearch != null)
+                        {
+                            handlerObjectIncludeInSearch(this, inSearch, localID);
+                        }
+                    }
+                    break;
+
+                case PacketType.ScriptAnswerYes:
+                    ScriptAnswerYesPacket scriptAnswer = (ScriptAnswerYesPacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (scriptAnswer.AgentData.SessionID != SessionId ||
+                            scriptAnswer.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    ScriptAnswer handlerScriptAnswer = OnScriptAnswer;
+                    if (handlerScriptAnswer != null)
+                    {
+                        handlerScriptAnswer(this, scriptAnswer.Data.TaskID, scriptAnswer.Data.ItemID, scriptAnswer.Data.Questions);
+                    }
+                    break;
+
+                case PacketType.ObjectClickAction:
+                    ObjectClickActionPacket ocpacket = (ObjectClickActionPacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (ocpacket.AgentData.SessionID != SessionId ||
+                            ocpacket.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    GenericCall7 handlerObjectClickAction = OnObjectClickAction;
+                    if (handlerObjectClickAction != null)
+                    {
+                        foreach (ObjectClickActionPacket.ObjectDataBlock odata in ocpacket.ObjectData)
+                        {
+                            byte action = odata.ClickAction;
+                            uint localID = odata.ObjectLocalID;
+                            handlerObjectClickAction(this, localID, action.ToString());
+                        }
+                    }
+                    break;
+
+                case PacketType.ObjectMaterial:
+                    ObjectMaterialPacket ompacket = (ObjectMaterialPacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (ompacket.AgentData.SessionID != SessionId ||
+                            ompacket.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    GenericCall7 handlerObjectMaterial = OnObjectMaterial;
+                    if (handlerObjectMaterial != null)
+                    {
+                        foreach (ObjectMaterialPacket.ObjectDataBlock odata in ompacket.ObjectData)
+                        {
+                            byte material = odata.Material;
+                            uint localID = odata.ObjectLocalID;
+                            handlerObjectMaterial(this, localID, material.ToString());
+                        }
+                    }
+                    break;
+
+                #endregion
+
+                #region Inventory/Asset/Other related packets
+
+                case PacketType.RequestImage:
+                    RequestImagePacket imageRequest = (RequestImagePacket)Pack;
+                    //m_log.Debug("image request: " + Pack.ToString());
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (imageRequest.AgentData.SessionID != SessionId ||
+                            imageRequest.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    //handlerTextureRequest = null;
+                    for (int i = 0; i < imageRequest.RequestImage.Length; i++)
+                    {
+                        if (OnRequestTexture != null)
+                        {
+                            TextureRequestArgs args = new TextureRequestArgs();
+                            args.RequestedAssetID = imageRequest.RequestImage[i].Image;
+                            args.DiscardLevel = imageRequest.RequestImage[i].DiscardLevel;
+                            args.PacketNumber = imageRequest.RequestImage[i].Packet;
+                            args.Priority = imageRequest.RequestImage[i].DownloadPriority;
+                            args.requestSequence = imageRequest.Header.Sequence;
+                            //handlerTextureRequest = OnRequestTexture;
+
+                            //if (handlerTextureRequest != null)
+                            //OnRequestTexture(this, args);
+
+                            // in the end, we null this, so we have to check if it's null
+                            if (m_imageManager != null)
+                            {
+                                m_imageManager.EnqueueReq(args);
+                            }
+                        }
+                    }
+                    break;
+
+                case PacketType.TransferRequest:
+                    //m_log.Debug("ClientView.ProcessPackets.cs:ProcessInPacket() - Got transfer request");
+
+                    TransferRequestPacket transfer = (TransferRequestPacket)Pack;
+                    //m_log.Debug("Transfer Request: " + transfer.ToString());
+                    // Validate inventory transfers
+                    // Has to be done here, because AssetCache can't do it
+                    //
+                    UUID taskID = UUID.Zero;
+                    if (transfer.TransferInfo.SourceType == 3)
+                    {
+                        taskID = new UUID(transfer.TransferInfo.Params, 48);
+                        UUID itemID = new UUID(transfer.TransferInfo.Params, 64);
+                        UUID requestID = new UUID(transfer.TransferInfo.Params, 80);
+                        if (!(((Scene)m_scene).Permissions.BypassPermissions()))
+                        {
+                            if (taskID != UUID.Zero) // Prim
+                            {
+                                SceneObjectPart part = ((Scene)m_scene).GetSceneObjectPart(taskID);
+                                if (part == null)
+                                    break;
+
+                                if (part.OwnerID != AgentId)
+                                    break;
+
+                                if ((part.OwnerMask & (uint)PermissionMask.Modify) == 0)
+                                    break;
+
+                                TaskInventoryItem ti = part.Inventory.GetInventoryItem(itemID);
+                                if (ti == null)
+                                    break;
+
+                                if (ti.OwnerID != AgentId)
+                                    break;
+
+                                if ((ti.CurrentPermissions & ((uint)PermissionMask.Modify | (uint)PermissionMask.Copy | (uint)PermissionMask.Transfer)) != ((uint)PermissionMask.Modify | (uint)PermissionMask.Copy | (uint)PermissionMask.Transfer))
+                                    break;
+
+                                if (ti.AssetID != requestID)
+                                    break;
+                            }
+                            else // Agent
+                            {
+                                IInventoryService invService = m_scene.RequestModuleInterface<IInventoryService>();
+                                InventoryItemBase assetRequestItem = new InventoryItemBase(itemID, AgentId);
+                                assetRequestItem = invService.GetItem(assetRequestItem);
+                                if (assetRequestItem == null)
+                                {
+                                    assetRequestItem = ((Scene)m_scene).CommsManager.UserProfileCacheService.LibraryRoot.FindItem(itemID);
+                                    if (assetRequestItem == null)
+                                        return;
+                                }
+
+                                // At this point, we need to apply perms
+                                // only to notecards and scripts. All
+                                // other asset types are always available
+                                //
+                                if (assetRequestItem.AssetType == 10)
+                                {
+                                    if (!((Scene)m_scene).Permissions.CanViewScript(itemID, UUID.Zero, AgentId))
+                                    {
+                                        SendAgentAlertMessage("Insufficient permissions to view script", false);
+                                        break;
+                                    }
+                                }
+                                else if (assetRequestItem.AssetType == 7)
+                                {
+                                    if (!((Scene)m_scene).Permissions.CanViewNotecard(itemID, UUID.Zero, AgentId))
+                                    {
+                                        SendAgentAlertMessage("Insufficient permissions to view notecard", false);
+                                        break;
+                                    }
+                                }
+
+                                if (assetRequestItem.AssetID != requestID)
+                                    break;
+                            }
+                        }
+                    }
+
+                    //m_assetCache.AddAssetRequest(this, transfer);
+
+                    MakeAssetRequest(transfer, taskID);
+
+                    /* RequestAsset = OnRequestAsset;
+                         if (RequestAsset != null)
+                         {
+                             RequestAsset(this, transfer);
+                         }*/
+                    break;
+                case PacketType.AssetUploadRequest:
+                    AssetUploadRequestPacket request = (AssetUploadRequestPacket)Pack;
+
+
+                    // m_log.Debug("upload request " + request.ToString());
+                    // m_log.Debug("upload request was for assetid: " + request.AssetBlock.TransactionID.Combine(this.SecureSessionId).ToString());
+                    UUID temp = UUID.Combine(request.AssetBlock.TransactionID, SecureSessionId);
+
+                    UDPAssetUploadRequest handlerAssetUploadRequest = OnAssetUploadRequest;
+
+                    if (handlerAssetUploadRequest != null)
+                    {
+                        handlerAssetUploadRequest(this, temp,
+                                                  request.AssetBlock.TransactionID, request.AssetBlock.Type,
+                                                  request.AssetBlock.AssetData, request.AssetBlock.StoreLocal,
+                                                  request.AssetBlock.Tempfile);
+                    }
+                    break;
+                case PacketType.RequestXfer:
+                    RequestXferPacket xferReq = (RequestXferPacket)Pack;
+
+                    RequestXfer handlerRequestXfer = OnRequestXfer;
+
+                    if (handlerRequestXfer != null)
+                    {
+                        handlerRequestXfer(this, xferReq.XferID.ID, Util.FieldToString(xferReq.XferID.Filename));
+                    }
+                    break;
+                case PacketType.SendXferPacket:
+                    SendXferPacketPacket xferRec = (SendXferPacketPacket)Pack;
+
+                    XferReceive handlerXferReceive = OnXferReceive;
+                    if (handlerXferReceive != null)
+                    {
+                        handlerXferReceive(this, xferRec.XferID.ID, xferRec.XferID.Packet, xferRec.DataPacket.Data);
+                    }
+                    break;
+                case PacketType.ConfirmXferPacket:
+                    ConfirmXferPacketPacket confirmXfer = (ConfirmXferPacketPacket)Pack;
+
+                    ConfirmXfer handlerConfirmXfer = OnConfirmXfer;
+                    if (handlerConfirmXfer != null)
+                    {
+                        handlerConfirmXfer(this, confirmXfer.XferID.ID, confirmXfer.XferID.Packet);
+                    }
+                    break;
+                case PacketType.AbortXfer:
+                    AbortXferPacket abortXfer = (AbortXferPacket)Pack;
+                    AbortXfer handlerAbortXfer = OnAbortXfer;
+                    if (handlerAbortXfer != null)
+                    {
+                        handlerAbortXfer(this, abortXfer.XferID.ID);
+                    }
+
+                    break;
+                case PacketType.CreateInventoryFolder:
+                    CreateInventoryFolderPacket invFolder = (CreateInventoryFolderPacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (invFolder.AgentData.SessionID != SessionId ||
+                            invFolder.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    CreateInventoryFolder handlerCreateInventoryFolder = OnCreateNewInventoryFolder;
+                    if (handlerCreateInventoryFolder != null)
+                    {
+                        handlerCreateInventoryFolder(this, invFolder.FolderData.FolderID,
+                                                     (ushort)invFolder.FolderData.Type,
+                                                     Util.FieldToString(invFolder.FolderData.Name),
+                                                     invFolder.FolderData.ParentID);
+                    }
+                    break;
+                case PacketType.UpdateInventoryFolder:
+                    if (OnUpdateInventoryFolder != null)
+                    {
+                        UpdateInventoryFolderPacket invFolderx = (UpdateInventoryFolderPacket)Pack;
+
+                        #region Packet Session and User Check
+                        if (m_checkPackets)
+                        {
+                            if (invFolderx.AgentData.SessionID != SessionId ||
+                                invFolderx.AgentData.AgentID != AgentId)
+                                break;
+                        }
+                        #endregion
+
+                        UpdateInventoryFolder handlerUpdateInventoryFolder = null;
+
+                        for (int i = 0; i < invFolderx.FolderData.Length; i++)
+                        {
+                            handlerUpdateInventoryFolder = OnUpdateInventoryFolder;
+                            if (handlerUpdateInventoryFolder != null)
+                            {
+                                OnUpdateInventoryFolder(this, invFolderx.FolderData[i].FolderID,
+                                                        (ushort)invFolderx.FolderData[i].Type,
+                                                        Util.FieldToString(invFolderx.FolderData[i].Name),
+                                                        invFolderx.FolderData[i].ParentID);
+                            }
+                        }
+                    }
+                    break;
+                case PacketType.MoveInventoryFolder:
+                    if (OnMoveInventoryFolder != null)
+                    {
+                        MoveInventoryFolderPacket invFoldery = (MoveInventoryFolderPacket)Pack;
+
+                        #region Packet Session and User Check
+                        if (m_checkPackets)
+                        {
+                            if (invFoldery.AgentData.SessionID != SessionId ||
+                                invFoldery.AgentData.AgentID != AgentId)
+                                break;
+                        }
+                        #endregion
+
+                        MoveInventoryFolder handlerMoveInventoryFolder = null;
+
+                        for (int i = 0; i < invFoldery.InventoryData.Length; i++)
+                        {
+                            handlerMoveInventoryFolder = OnMoveInventoryFolder;
+                            if (handlerMoveInventoryFolder != null)
+                            {
+                                OnMoveInventoryFolder(this, invFoldery.InventoryData[i].FolderID,
+                                                      invFoldery.InventoryData[i].ParentID);
+                            }
+                        }
+                    }
+                    break;
+                case PacketType.CreateInventoryItem:
+                    CreateInventoryItemPacket createItem = (CreateInventoryItemPacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (createItem.AgentData.SessionID != SessionId ||
+                            createItem.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    CreateNewInventoryItem handlerCreateNewInventoryItem = OnCreateNewInventoryItem;
+                    if (handlerCreateNewInventoryItem != null)
+                    {
+                        handlerCreateNewInventoryItem(this, createItem.InventoryBlock.TransactionID,
+                                                      createItem.InventoryBlock.FolderID,
+                                                      createItem.InventoryBlock.CallbackID,
+                                                      Util.FieldToString(createItem.InventoryBlock.Description),
+                                                      Util.FieldToString(createItem.InventoryBlock.Name),
+                                                      createItem.InventoryBlock.InvType,
+                                                      createItem.InventoryBlock.Type,
+                                                      createItem.InventoryBlock.WearableType,
+                                                      createItem.InventoryBlock.NextOwnerMask,
+                                                      Util.UnixTimeSinceEpoch());
+                    }
+                    break;
+                case PacketType.FetchInventory:
+                    if (OnFetchInventory != null)
+                    {
+                        FetchInventoryPacket FetchInventoryx = (FetchInventoryPacket)Pack;
+
+                        #region Packet Session and User Check
+                        if (m_checkPackets)
+                        {
+                            if (FetchInventoryx.AgentData.SessionID != SessionId ||
+                                FetchInventoryx.AgentData.AgentID != AgentId)
+                                break;
+                        }
+                        #endregion
+
+                        FetchInventory handlerFetchInventory = null;
+
+                        for (int i = 0; i < FetchInventoryx.InventoryData.Length; i++)
+                        {
+                            handlerFetchInventory = OnFetchInventory;
+
+                            if (handlerFetchInventory != null)
+                            {
+                                OnFetchInventory(this, FetchInventoryx.InventoryData[i].ItemID,
+                                                 FetchInventoryx.InventoryData[i].OwnerID);
+                            }
+                        }
+                    }
+                    break;
+                case PacketType.FetchInventoryDescendents:
+                    FetchInventoryDescendentsPacket Fetch = (FetchInventoryDescendentsPacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (Fetch.AgentData.SessionID != SessionId ||
+                            Fetch.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    FetchInventoryDescendents handlerFetchInventoryDescendents = OnFetchInventoryDescendents;
+                    if (handlerFetchInventoryDescendents != null)
+                    {
+                        handlerFetchInventoryDescendents(this, Fetch.InventoryData.FolderID, Fetch.InventoryData.OwnerID,
+                                                         Fetch.InventoryData.FetchFolders, Fetch.InventoryData.FetchItems,
+                                                         Fetch.InventoryData.SortOrder);
+                    }
+                    break;
+                case PacketType.PurgeInventoryDescendents:
+                    PurgeInventoryDescendentsPacket Purge = (PurgeInventoryDescendentsPacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (Purge.AgentData.SessionID != SessionId ||
+                            Purge.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    PurgeInventoryDescendents handlerPurgeInventoryDescendents = OnPurgeInventoryDescendents;
+                    if (handlerPurgeInventoryDescendents != null)
+                    {
+                        handlerPurgeInventoryDescendents(this, Purge.InventoryData.FolderID);
+                    }
+                    break;
+                case PacketType.UpdateInventoryItem:
+                    UpdateInventoryItemPacket inventoryItemUpdate = (UpdateInventoryItemPacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (inventoryItemUpdate.AgentData.SessionID != SessionId ||
+                            inventoryItemUpdate.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    if (OnUpdateInventoryItem != null)
+                    {
+                        UpdateInventoryItem handlerUpdateInventoryItem = null;
+                        for (int i = 0; i < inventoryItemUpdate.InventoryData.Length; i++)
+                        {
+                            handlerUpdateInventoryItem = OnUpdateInventoryItem;
+
+                            if (handlerUpdateInventoryItem != null)
+                            {
+                                InventoryItemBase itemUpd = new InventoryItemBase();
+                                itemUpd.ID = inventoryItemUpdate.InventoryData[i].ItemID;
+                                itemUpd.Name = Util.FieldToString(inventoryItemUpdate.InventoryData[i].Name);
+                                itemUpd.Description = Util.FieldToString(inventoryItemUpdate.InventoryData[i].Description);
+                                itemUpd.GroupID = inventoryItemUpdate.InventoryData[i].GroupID;
+                                itemUpd.GroupOwned = inventoryItemUpdate.InventoryData[i].GroupOwned;
+                                itemUpd.GroupPermissions = inventoryItemUpdate.InventoryData[i].GroupMask;
+                                itemUpd.NextPermissions = inventoryItemUpdate.InventoryData[i].NextOwnerMask;
+                                itemUpd.EveryOnePermissions = inventoryItemUpdate.InventoryData[i].EveryoneMask;
+                                itemUpd.CreationDate = inventoryItemUpdate.InventoryData[i].CreationDate;
+                                itemUpd.Folder = inventoryItemUpdate.InventoryData[i].FolderID;
+                                itemUpd.InvType = inventoryItemUpdate.InventoryData[i].InvType;
+                                itemUpd.SalePrice = inventoryItemUpdate.InventoryData[i].SalePrice;
+                                itemUpd.SaleType = inventoryItemUpdate.InventoryData[i].SaleType;
+                                itemUpd.Flags = inventoryItemUpdate.InventoryData[i].Flags;
+
+                                OnUpdateInventoryItem(this, inventoryItemUpdate.InventoryData[i].TransactionID,
+                                                      inventoryItemUpdate.InventoryData[i].ItemID,
+                                                      itemUpd);
+                            }
+                        }
+                    }
+                    break;
+                case PacketType.CopyInventoryItem:
+                    CopyInventoryItemPacket copyitem = (CopyInventoryItemPacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (copyitem.AgentData.SessionID != SessionId ||
+                            copyitem.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    CopyInventoryItem handlerCopyInventoryItem = null;
+                    if (OnCopyInventoryItem != null)
+                    {
+                        foreach (CopyInventoryItemPacket.InventoryDataBlock datablock in copyitem.InventoryData)
+                        {
+                            handlerCopyInventoryItem = OnCopyInventoryItem;
+                            if (handlerCopyInventoryItem != null)
+                            {
+                                handlerCopyInventoryItem(this, datablock.CallbackID, datablock.OldAgentID,
+                                                         datablock.OldItemID, datablock.NewFolderID,
+                                                         Util.FieldToString(datablock.NewName));
+                            }
+                        }
+                    }
+                    break;
+                case PacketType.MoveInventoryItem:
+                    MoveInventoryItemPacket moveitem = (MoveInventoryItemPacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (moveitem.AgentData.SessionID != SessionId ||
+                            moveitem.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    if (OnMoveInventoryItem != null)
+                    {
+                        MoveInventoryItem handlerMoveInventoryItem = null;
+                        InventoryItemBase itm = null;
+                        List<InventoryItemBase> items = new List<InventoryItemBase>();
+                        foreach (MoveInventoryItemPacket.InventoryDataBlock datablock in moveitem.InventoryData)
+                        {
+                            itm = new InventoryItemBase(datablock.ItemID, AgentId);
+                            itm.Folder = datablock.FolderID;
+                            itm.Name = Util.FieldToString(datablock.NewName);
+                            // weird, comes out as empty string
+                            //m_log.DebugFormat("[XXX] new name: {0}", itm.Name);
+                            items.Add(itm);
+                        }
+                        handlerMoveInventoryItem = OnMoveInventoryItem;
+                        if (handlerMoveInventoryItem != null)
+                        {
+                            handlerMoveInventoryItem(this, items);
+                        }
+                    }
+                    break;
+                case PacketType.RemoveInventoryItem:
+                    RemoveInventoryItemPacket removeItem = (RemoveInventoryItemPacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (removeItem.AgentData.SessionID != SessionId ||
+                            removeItem.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    if (OnRemoveInventoryItem != null)
+                    {
+                        RemoveInventoryItem handlerRemoveInventoryItem = null;
+                        List<UUID> uuids = new List<UUID>();
+                        foreach (RemoveInventoryItemPacket.InventoryDataBlock datablock in removeItem.InventoryData)
+                        {
+                            uuids.Add(datablock.ItemID);
+                        }
+                        handlerRemoveInventoryItem = OnRemoveInventoryItem;
+                        if (handlerRemoveInventoryItem != null)
+                        {
+                            handlerRemoveInventoryItem(this, uuids);
+                        }
+
+                    }
+                    break;
+                case PacketType.RemoveInventoryFolder:
+                    RemoveInventoryFolderPacket removeFolder = (RemoveInventoryFolderPacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (removeFolder.AgentData.SessionID != SessionId ||
+                            removeFolder.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    if (OnRemoveInventoryFolder != null)
+                    {
+                        RemoveInventoryFolder handlerRemoveInventoryFolder = null;
+                        List<UUID> uuids = new List<UUID>();
+                        foreach (RemoveInventoryFolderPacket.FolderDataBlock datablock in removeFolder.FolderData)
+                        {
+                            uuids.Add(datablock.FolderID);
+                        }
+                        handlerRemoveInventoryFolder = OnRemoveInventoryFolder;
+                        if (handlerRemoveInventoryFolder != null)
+                        {
+                            handlerRemoveInventoryFolder(this, uuids);
+                        }
+                    }
+                    break;
+                case PacketType.RemoveInventoryObjects:
+                    RemoveInventoryObjectsPacket removeObject = (RemoveInventoryObjectsPacket)Pack;
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (removeObject.AgentData.SessionID != SessionId ||
+                            removeObject.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+                    if (OnRemoveInventoryFolder != null)
+                    {
+                        RemoveInventoryFolder handlerRemoveInventoryFolder = null;
+                        List<UUID> uuids = new List<UUID>();
+                        foreach (RemoveInventoryObjectsPacket.FolderDataBlock datablock in removeObject.FolderData)
+                        {
+                            uuids.Add(datablock.FolderID);
+                        }
+                        handlerRemoveInventoryFolder = OnRemoveInventoryFolder;
+                        if (handlerRemoveInventoryFolder != null)
+                        {
+                            handlerRemoveInventoryFolder(this, uuids);
+                        }
+                    }
+
+                    if (OnRemoveInventoryItem != null)
+                    {
+                        RemoveInventoryItem handlerRemoveInventoryItem = null;
+                        List<UUID> uuids = new List<UUID>();
+                        foreach (RemoveInventoryObjectsPacket.ItemDataBlock datablock in removeObject.ItemData)
+                        {
+                            uuids.Add(datablock.ItemID);
+                        }
+                        handlerRemoveInventoryItem = OnRemoveInventoryItem;
+                        if (handlerRemoveInventoryItem != null)
+                        {
+                            handlerRemoveInventoryItem(this, uuids);
+                        }
+                    }
+                    break;
+                case PacketType.RequestTaskInventory:
+                    RequestTaskInventoryPacket requesttask = (RequestTaskInventoryPacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (requesttask.AgentData.SessionID != SessionId ||
+                            requesttask.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    RequestTaskInventory handlerRequestTaskInventory = OnRequestTaskInventory;
+                    if (handlerRequestTaskInventory != null)
+                    {
+                        handlerRequestTaskInventory(this, requesttask.InventoryData.LocalID);
+                    }
+                    break;
+                case PacketType.UpdateTaskInventory:
+                    UpdateTaskInventoryPacket updatetask = (UpdateTaskInventoryPacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (updatetask.AgentData.SessionID != SessionId ||
+                            updatetask.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    if (OnUpdateTaskInventory != null)
+                    {
+                        if (updatetask.UpdateData.Key == 0)
+                        {
+                            UpdateTaskInventory handlerUpdateTaskInventory = OnUpdateTaskInventory;
+                            if (handlerUpdateTaskInventory != null)
+                            {
+                                TaskInventoryItem newTaskItem = new TaskInventoryItem();
+                                newTaskItem.ItemID = updatetask.InventoryData.ItemID;
+                                newTaskItem.ParentID = updatetask.InventoryData.FolderID;
+                                newTaskItem.CreatorID = updatetask.InventoryData.CreatorID;
+                                newTaskItem.OwnerID = updatetask.InventoryData.OwnerID;
+                                newTaskItem.GroupID = updatetask.InventoryData.GroupID;
+                                newTaskItem.BasePermissions = updatetask.InventoryData.BaseMask;
+                                newTaskItem.CurrentPermissions = updatetask.InventoryData.OwnerMask;
+                                newTaskItem.GroupPermissions = updatetask.InventoryData.GroupMask;
+                                newTaskItem.EveryonePermissions = updatetask.InventoryData.EveryoneMask;
+                                newTaskItem.NextPermissions = updatetask.InventoryData.NextOwnerMask;
+                                //newTaskItem.GroupOwned=updatetask.InventoryData.GroupOwned;
+                                newTaskItem.Type = updatetask.InventoryData.Type;
+                                newTaskItem.InvType = updatetask.InventoryData.InvType;
+                                newTaskItem.Flags = updatetask.InventoryData.Flags;
+                                //newTaskItem.SaleType=updatetask.InventoryData.SaleType;
+                                //newTaskItem.SalePrice=updatetask.InventoryData.SalePrice;;
+                                newTaskItem.Name = Util.FieldToString(updatetask.InventoryData.Name);
+                                newTaskItem.Description = Util.FieldToString(updatetask.InventoryData.Description);
+                                newTaskItem.CreationDate = (uint)updatetask.InventoryData.CreationDate;
+                                handlerUpdateTaskInventory(this, updatetask.InventoryData.TransactionID,
+                                                           newTaskItem, updatetask.UpdateData.LocalID);
+                            }
+                        }
+                    }
+
+                    break;
+
+                case PacketType.RemoveTaskInventory:
+
+                    RemoveTaskInventoryPacket removeTask = (RemoveTaskInventoryPacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (removeTask.AgentData.SessionID != SessionId ||
+                            removeTask.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    RemoveTaskInventory handlerRemoveTaskItem = OnRemoveTaskItem;
+
+                    if (handlerRemoveTaskItem != null)
+                    {
+                        handlerRemoveTaskItem(this, removeTask.InventoryData.ItemID, removeTask.InventoryData.LocalID);
+                    }
+
+                    break;
+
+                case PacketType.MoveTaskInventory:
+
+                    MoveTaskInventoryPacket moveTaskInventoryPacket = (MoveTaskInventoryPacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (moveTaskInventoryPacket.AgentData.SessionID != SessionId ||
+                            moveTaskInventoryPacket.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    MoveTaskInventory handlerMoveTaskItem = OnMoveTaskItem;
+
+                    if (handlerMoveTaskItem != null)
+                    {
+                        handlerMoveTaskItem(
+                            this, moveTaskInventoryPacket.AgentData.FolderID,
+                            moveTaskInventoryPacket.InventoryData.LocalID,
+                            moveTaskInventoryPacket.InventoryData.ItemID);
+                    }
+
+                    break;
+
+                case PacketType.RezScript:
+                    //m_log.Debug(Pack.ToString());
+                    RezScriptPacket rezScriptx = (RezScriptPacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (rezScriptx.AgentData.SessionID != SessionId ||
+                            rezScriptx.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    RezScript handlerRezScript = OnRezScript;
+                    InventoryItemBase item = new InventoryItemBase();
+                    item.ID = rezScriptx.InventoryBlock.ItemID;
+                    item.Folder = rezScriptx.InventoryBlock.FolderID;
+                    item.CreatorId = rezScriptx.InventoryBlock.CreatorID.ToString();
+                    item.Owner = rezScriptx.InventoryBlock.OwnerID;
+                    item.BasePermissions = rezScriptx.InventoryBlock.BaseMask;
+                    item.CurrentPermissions = rezScriptx.InventoryBlock.OwnerMask;
+                    item.EveryOnePermissions = rezScriptx.InventoryBlock.EveryoneMask;
+                    item.NextPermissions = rezScriptx.InventoryBlock.NextOwnerMask;
+                    item.GroupPermissions = rezScriptx.InventoryBlock.GroupMask;
+                    item.GroupOwned = rezScriptx.InventoryBlock.GroupOwned;
+                    item.GroupID = rezScriptx.InventoryBlock.GroupID;
+                    item.AssetType = rezScriptx.InventoryBlock.Type;
+                    item.InvType = rezScriptx.InventoryBlock.InvType;
+                    item.Flags = rezScriptx.InventoryBlock.Flags;
+                    item.SaleType = rezScriptx.InventoryBlock.SaleType;
+                    item.SalePrice = rezScriptx.InventoryBlock.SalePrice;
+                    item.Name = Util.FieldToString(rezScriptx.InventoryBlock.Name);
+                    item.Description = Util.FieldToString(rezScriptx.InventoryBlock.Description);
+                    item.CreationDate = rezScriptx.InventoryBlock.CreationDate;
+
+                    if (handlerRezScript != null)
+                    {
+                        handlerRezScript(this, item, rezScriptx.InventoryBlock.TransactionID, rezScriptx.UpdateBlock.ObjectLocalID);
+                    }
+                    break;
+
+                case PacketType.MapLayerRequest:
+                    RequestMapLayer();
+                    break;
+                case PacketType.MapBlockRequest:
+                    MapBlockRequestPacket MapRequest = (MapBlockRequestPacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (MapRequest.AgentData.SessionID != SessionId ||
+                            MapRequest.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    RequestMapBlocks handlerRequestMapBlocks = OnRequestMapBlocks;
+                    if (handlerRequestMapBlocks != null)
+                    {
+                        handlerRequestMapBlocks(this, MapRequest.PositionData.MinX, MapRequest.PositionData.MinY,
+                                                MapRequest.PositionData.MaxX, MapRequest.PositionData.MaxY, MapRequest.AgentData.Flags);
+                    }
+                    break;
+                case PacketType.MapNameRequest:
+                    MapNameRequestPacket map = (MapNameRequestPacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (map.AgentData.SessionID != SessionId ||
+                            map.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    string mapName = Util.UTF8.GetString(map.NameData.Name, 0,
+                                                             map.NameData.Name.Length - 1);
+                    RequestMapName handlerMapNameRequest = OnMapNameRequest;
+                    if (handlerMapNameRequest != null)
+                    {
+                        handlerMapNameRequest(this, mapName);
+                    }
+                    break;
+                case PacketType.TeleportLandmarkRequest:
+                    TeleportLandmarkRequestPacket tpReq = (TeleportLandmarkRequestPacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (tpReq.Info.SessionID != SessionId ||
+                            tpReq.Info.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    UUID lmid = tpReq.Info.LandmarkID;
+                    AssetLandmark lm;
+                    if (lmid != UUID.Zero)
+                    {
+                        //AssetBase lma = m_assetCache.GetAsset(lmid, false);
+                        AssetBase lma = m_assetService.Get(lmid.ToString());
+
+                        if (lma == null)
+                        {
+                            // Failed to find landmark
+                            TeleportCancelPacket tpCancel = (TeleportCancelPacket)PacketPool.Instance.GetPacket(PacketType.TeleportCancel);
+                            tpCancel.Info.SessionID = tpReq.Info.SessionID;
+                            tpCancel.Info.AgentID = tpReq.Info.AgentID;
+                            OutPacket(tpCancel, ThrottleOutPacketType.Task);
+                        }
+
+                        try
+                        {
+                            lm = new AssetLandmark(lma);
+                        }
+                        catch (NullReferenceException)
+                        {
+                            // asset not found generates null ref inside the assetlandmark constructor.
+                            TeleportCancelPacket tpCancel = (TeleportCancelPacket)PacketPool.Instance.GetPacket(PacketType.TeleportCancel);
+                            tpCancel.Info.SessionID = tpReq.Info.SessionID;
+                            tpCancel.Info.AgentID = tpReq.Info.AgentID;
+                            OutPacket(tpCancel, ThrottleOutPacketType.Task);
+                            break;
+                        }
+                    }
+                    else
+                    {
+                        // Teleport home request
+                        UUIDNameRequest handlerTeleportHomeRequest = OnTeleportHomeRequest;
+                        if (handlerTeleportHomeRequest != null)
+                        {
+                            handlerTeleportHomeRequest(AgentId, this);
+                        }
+                        break;
+                    }
+
+                    TeleportLandmarkRequest handlerTeleportLandmarkRequest = OnTeleportLandmarkRequest;
+                    if (handlerTeleportLandmarkRequest != null)
+                    {
+                        handlerTeleportLandmarkRequest(this, lm.RegionID, lm.Position);
+                    }
+                    else
+                    {
+                        //no event handler so cancel request
+
+
+                        TeleportCancelPacket tpCancel = (TeleportCancelPacket)PacketPool.Instance.GetPacket(PacketType.TeleportCancel);
+                        tpCancel.Info.AgentID = tpReq.Info.AgentID;
+                        tpCancel.Info.SessionID = tpReq.Info.SessionID;
+                        OutPacket(tpCancel, ThrottleOutPacketType.Task);
+
+                    }
+                    break;
+
+                case PacketType.TeleportLocationRequest:
+                    TeleportLocationRequestPacket tpLocReq = (TeleportLocationRequestPacket)Pack;
+                    // m_log.Debug(tpLocReq.ToString());
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (tpLocReq.AgentData.SessionID != SessionId ||
+                            tpLocReq.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    TeleportLocationRequest handlerTeleportLocationRequest = OnTeleportLocationRequest;
+                    if (handlerTeleportLocationRequest != null)
+                    {
+                        handlerTeleportLocationRequest(this, tpLocReq.Info.RegionHandle, tpLocReq.Info.Position,
+                                                       tpLocReq.Info.LookAt, 16);
+                    }
+                    else
+                    {
+                        //no event handler so cancel request
+                        TeleportCancelPacket tpCancel = (TeleportCancelPacket)PacketPool.Instance.GetPacket(PacketType.TeleportCancel);
+                        tpCancel.Info.SessionID = tpLocReq.AgentData.SessionID;
+                        tpCancel.Info.AgentID = tpLocReq.AgentData.AgentID;
+                        OutPacket(tpCancel, ThrottleOutPacketType.Task);
+                    }
+                    break;
+
+                #endregion
+
+                case PacketType.UUIDNameRequest:
+                    UUIDNameRequestPacket incoming = (UUIDNameRequestPacket)Pack;
+
+                    foreach (UUIDNameRequestPacket.UUIDNameBlockBlock UUIDBlock in incoming.UUIDNameBlock)
+                    {
+                        UUIDNameRequest handlerNameRequest = OnNameFromUUIDRequest;
+                        if (handlerNameRequest != null)
+                        {
+                            handlerNameRequest(UUIDBlock.ID, this);
+                        }
+                    }
+                    break;
+
+                #region Parcel related packets
+
+                case PacketType.RegionHandleRequest:
+                    RegionHandleRequestPacket rhrPack = (RegionHandleRequestPacket)Pack;
+
+                    RegionHandleRequest handlerRegionHandleRequest = OnRegionHandleRequest;
+                    if (handlerRegionHandleRequest != null)
+                    {
+                        handlerRegionHandleRequest(this, rhrPack.RequestBlock.RegionID);
+                    }
+                    break;
+
+                case PacketType.ParcelInfoRequest:
+                    ParcelInfoRequestPacket pirPack = (ParcelInfoRequestPacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (pirPack.AgentData.SessionID != SessionId ||
+                            pirPack.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    ParcelInfoRequest handlerParcelInfoRequest = OnParcelInfoRequest;
+                    if (handlerParcelInfoRequest != null)
+                    {
+                        handlerParcelInfoRequest(this, pirPack.Data.ParcelID);
+                    }
+                    break;
+
+                case PacketType.ParcelAccessListRequest:
+                    ParcelAccessListRequestPacket requestPacket = (ParcelAccessListRequestPacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (requestPacket.AgentData.SessionID != SessionId ||
+                            requestPacket.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    ParcelAccessListRequest handlerParcelAccessListRequest = OnParcelAccessListRequest;
+
+                    if (handlerParcelAccessListRequest != null)
+                    {
+                        handlerParcelAccessListRequest(requestPacket.AgentData.AgentID, requestPacket.AgentData.SessionID,
+                                                       requestPacket.Data.Flags, requestPacket.Data.SequenceID,
+                                                       requestPacket.Data.LocalID, this);
+                    }
+                    break;
+
+                case PacketType.ParcelAccessListUpdate:
+                    ParcelAccessListUpdatePacket updatePacket = (ParcelAccessListUpdatePacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (updatePacket.AgentData.SessionID != SessionId ||
+                            updatePacket.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    List<ParcelManager.ParcelAccessEntry> entries = new List<ParcelManager.ParcelAccessEntry>();
+                    foreach (ParcelAccessListUpdatePacket.ListBlock block in updatePacket.List)
+                    {
+                        ParcelManager.ParcelAccessEntry entry = new ParcelManager.ParcelAccessEntry();
+                        entry.AgentID = block.ID;
+                        entry.Flags = (AccessList)block.Flags;
+                        entry.Time = new DateTime();
+                        entries.Add(entry);
+                    }
+
+                    ParcelAccessListUpdateRequest handlerParcelAccessListUpdateRequest = OnParcelAccessListUpdateRequest;
+                    if (handlerParcelAccessListUpdateRequest != null)
+                    {
+                        handlerParcelAccessListUpdateRequest(updatePacket.AgentData.AgentID,
+                                                             updatePacket.AgentData.SessionID, updatePacket.Data.Flags,
+                                                             updatePacket.Data.LocalID, entries, this);
+                    }
+                    break;
+                case PacketType.ParcelPropertiesRequest:
+
+                    ParcelPropertiesRequestPacket propertiesRequest = (ParcelPropertiesRequestPacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (propertiesRequest.AgentData.SessionID != SessionId ||
+                            propertiesRequest.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    ParcelPropertiesRequest handlerParcelPropertiesRequest = OnParcelPropertiesRequest;
+                    if (handlerParcelPropertiesRequest != null)
+                    {
+                        handlerParcelPropertiesRequest((int)Math.Round(propertiesRequest.ParcelData.West),
+                                                       (int)Math.Round(propertiesRequest.ParcelData.South),
+                                                       (int)Math.Round(propertiesRequest.ParcelData.East),
+                                                       (int)Math.Round(propertiesRequest.ParcelData.North),
+                                                       propertiesRequest.ParcelData.SequenceID,
+                                                       propertiesRequest.ParcelData.SnapSelection, this);
+                    }
+                    break;
+                case PacketType.ParcelDivide:
+                    ParcelDividePacket landDivide = (ParcelDividePacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (landDivide.AgentData.SessionID != SessionId ||
+                            landDivide.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    ParcelDivideRequest handlerParcelDivideRequest = OnParcelDivideRequest;
+                    if (handlerParcelDivideRequest != null)
+                    {
+                        handlerParcelDivideRequest((int)Math.Round(landDivide.ParcelData.West),
+                                                   (int)Math.Round(landDivide.ParcelData.South),
+                                                   (int)Math.Round(landDivide.ParcelData.East),
+                                                   (int)Math.Round(landDivide.ParcelData.North), this);
+                    }
+                    break;
+                case PacketType.ParcelJoin:
+                    ParcelJoinPacket landJoin = (ParcelJoinPacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (landJoin.AgentData.SessionID != SessionId ||
+                            landJoin.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    ParcelJoinRequest handlerParcelJoinRequest = OnParcelJoinRequest;
+
+                    if (handlerParcelJoinRequest != null)
+                    {
+                        handlerParcelJoinRequest((int)Math.Round(landJoin.ParcelData.West),
+                                                 (int)Math.Round(landJoin.ParcelData.South),
+                                                 (int)Math.Round(landJoin.ParcelData.East),
+                                                 (int)Math.Round(landJoin.ParcelData.North), this);
+                    }
+                    break;
+                case PacketType.ParcelPropertiesUpdate:
+                    ParcelPropertiesUpdatePacket parcelPropertiesPacket = (ParcelPropertiesUpdatePacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (parcelPropertiesPacket.AgentData.SessionID != SessionId ||
+                            parcelPropertiesPacket.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    ParcelPropertiesUpdateRequest handlerParcelPropertiesUpdateRequest = OnParcelPropertiesUpdateRequest;
+
+                    if (handlerParcelPropertiesUpdateRequest != null)
+                    {
+                        LandUpdateArgs args = new LandUpdateArgs();
+
+                        args.AuthBuyerID = parcelPropertiesPacket.ParcelData.AuthBuyerID;
+                        args.Category = (ParcelCategory)parcelPropertiesPacket.ParcelData.Category;
+                        args.Desc = Utils.BytesToString(parcelPropertiesPacket.ParcelData.Desc);
+                        args.GroupID = parcelPropertiesPacket.ParcelData.GroupID;
+                        args.LandingType = parcelPropertiesPacket.ParcelData.LandingType;
+                        args.MediaAutoScale = parcelPropertiesPacket.ParcelData.MediaAutoScale;
+                        args.MediaID = parcelPropertiesPacket.ParcelData.MediaID;
+                        args.MediaURL = Utils.BytesToString(parcelPropertiesPacket.ParcelData.MediaURL);
+                        args.MusicURL = Utils.BytesToString(parcelPropertiesPacket.ParcelData.MusicURL);
+                        args.Name = Utils.BytesToString(parcelPropertiesPacket.ParcelData.Name);
+                        args.ParcelFlags = parcelPropertiesPacket.ParcelData.ParcelFlags;
+                        args.PassHours = parcelPropertiesPacket.ParcelData.PassHours;
+                        args.PassPrice = parcelPropertiesPacket.ParcelData.PassPrice;
+                        args.SalePrice = parcelPropertiesPacket.ParcelData.SalePrice;
+                        args.SnapshotID = parcelPropertiesPacket.ParcelData.SnapshotID;
+                        args.UserLocation = parcelPropertiesPacket.ParcelData.UserLocation;
+                        args.UserLookAt = parcelPropertiesPacket.ParcelData.UserLookAt;
+                        handlerParcelPropertiesUpdateRequest(args, parcelPropertiesPacket.ParcelData.LocalID, this);
+                    }
+                    break;
+                case PacketType.ParcelSelectObjects:
+                    ParcelSelectObjectsPacket selectPacket = (ParcelSelectObjectsPacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (selectPacket.AgentData.SessionID != SessionId ||
+                            selectPacket.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    List<UUID> returnIDs = new List<UUID>();
+
+                    foreach (ParcelSelectObjectsPacket.ReturnIDsBlock rb in
+                             selectPacket.ReturnIDs)
+                    {
+                        returnIDs.Add(rb.ReturnID);
+                    }
+
+                    ParcelSelectObjects handlerParcelSelectObjects = OnParcelSelectObjects;
+
+                    if (handlerParcelSelectObjects != null)
+                    {
+                        handlerParcelSelectObjects(selectPacket.ParcelData.LocalID,
+                                                   Convert.ToInt32(selectPacket.ParcelData.ReturnType), returnIDs, this);
+                    }
+                    break;
+                case PacketType.ParcelObjectOwnersRequest:
+                    //m_log.Debug(Pack.ToString());
+                    ParcelObjectOwnersRequestPacket reqPacket = (ParcelObjectOwnersRequestPacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (reqPacket.AgentData.SessionID != SessionId ||
+                            reqPacket.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    ParcelObjectOwnerRequest handlerParcelObjectOwnerRequest = OnParcelObjectOwnerRequest;
+
+                    if (handlerParcelObjectOwnerRequest != null)
+                    {
+                        handlerParcelObjectOwnerRequest(reqPacket.ParcelData.LocalID, this);
+                    }
+                    break;
+                case PacketType.ParcelGodForceOwner:
+                    ParcelGodForceOwnerPacket godForceOwnerPacket = (ParcelGodForceOwnerPacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (godForceOwnerPacket.AgentData.SessionID != SessionId ||
+                            godForceOwnerPacket.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    ParcelGodForceOwner handlerParcelGodForceOwner = OnParcelGodForceOwner;
+                    if (handlerParcelGodForceOwner != null)
+                    {
+                        handlerParcelGodForceOwner(godForceOwnerPacket.Data.LocalID, godForceOwnerPacket.Data.OwnerID, this);
+                    }
+                    break;
+                case PacketType.ParcelRelease:
+                    ParcelReleasePacket releasePacket = (ParcelReleasePacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (releasePacket.AgentData.SessionID != SessionId ||
+                            releasePacket.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    ParcelAbandonRequest handlerParcelAbandonRequest = OnParcelAbandonRequest;
+                    if (handlerParcelAbandonRequest != null)
+                    {
+                        handlerParcelAbandonRequest(releasePacket.Data.LocalID, this);
+                    }
+                    break;
+                case PacketType.ParcelReclaim:
+                    ParcelReclaimPacket reclaimPacket = (ParcelReclaimPacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (reclaimPacket.AgentData.SessionID != SessionId ||
+                            reclaimPacket.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    ParcelReclaim handlerParcelReclaim = OnParcelReclaim;
+                    if (handlerParcelReclaim != null)
+                    {
+                        handlerParcelReclaim(reclaimPacket.Data.LocalID, this);
+                    }
+                    break;
+                case PacketType.ParcelReturnObjects:
+
+
+                    ParcelReturnObjectsPacket parcelReturnObjects = (ParcelReturnObjectsPacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (parcelReturnObjects.AgentData.SessionID != SessionId ||
+                            parcelReturnObjects.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    UUID[] puserselectedOwnerIDs = new UUID[parcelReturnObjects.OwnerIDs.Length];
+                    for (int parceliterator = 0; parceliterator < parcelReturnObjects.OwnerIDs.Length; parceliterator++)
+                        puserselectedOwnerIDs[parceliterator] = parcelReturnObjects.OwnerIDs[parceliterator].OwnerID;
+
+                    UUID[] puserselectedTaskIDs = new UUID[parcelReturnObjects.TaskIDs.Length];
+
+                    for (int parceliterator = 0; parceliterator < parcelReturnObjects.TaskIDs.Length; parceliterator++)
+                        puserselectedTaskIDs[parceliterator] = parcelReturnObjects.TaskIDs[parceliterator].TaskID;
+
+                    ParcelReturnObjectsRequest handlerParcelReturnObjectsRequest = OnParcelReturnObjectsRequest;
+                    if (handlerParcelReturnObjectsRequest != null)
+                    {
+                        handlerParcelReturnObjectsRequest(parcelReturnObjects.ParcelData.LocalID, parcelReturnObjects.ParcelData.ReturnType, puserselectedOwnerIDs, puserselectedTaskIDs, this);
+
+                    }
+                    break;
+
+                case PacketType.ParcelSetOtherCleanTime:
+                    ParcelSetOtherCleanTimePacket parcelSetOtherCleanTimePacket = (ParcelSetOtherCleanTimePacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (parcelSetOtherCleanTimePacket.AgentData.SessionID != SessionId ||
+                            parcelSetOtherCleanTimePacket.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    ParcelSetOtherCleanTime handlerParcelSetOtherCleanTime = OnParcelSetOtherCleanTime;
+                    if (handlerParcelSetOtherCleanTime != null)
+                    {
+                        handlerParcelSetOtherCleanTime(this,
+                                                       parcelSetOtherCleanTimePacket.ParcelData.LocalID,
+                                                       parcelSetOtherCleanTimePacket.ParcelData.OtherCleanTime);
+                    }
+                    break;
+
+                case PacketType.LandStatRequest:
+                    LandStatRequestPacket lsrp = (LandStatRequestPacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (lsrp.AgentData.SessionID != SessionId ||
+                            lsrp.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    GodLandStatRequest handlerLandStatRequest = OnLandStatRequest;
+                    if (handlerLandStatRequest != null)
+                    {
+                        handlerLandStatRequest(lsrp.RequestData.ParcelLocalID, lsrp.RequestData.ReportType, lsrp.RequestData.RequestFlags, Utils.BytesToString(lsrp.RequestData.Filter), this);
+                    }
+                    break;
+
+                case PacketType.ParcelDwellRequest:
+                    ParcelDwellRequestPacket dwellrq =
+                            (ParcelDwellRequestPacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (dwellrq.AgentData.SessionID != SessionId ||
+                            dwellrq.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    ParcelDwellRequest handlerParcelDwellRequest = OnParcelDwellRequest;
+                    if (handlerParcelDwellRequest != null)
+                    {
+                        handlerParcelDwellRequest(dwellrq.Data.LocalID, this);
+                    }
+                    break;
+
+                #endregion
+
+                #region Estate Packets
+
+                case PacketType.EstateOwnerMessage:
+                    EstateOwnerMessagePacket messagePacket = (EstateOwnerMessagePacket)Pack;
+                    //m_log.Debug(messagePacket.ToString());
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (messagePacket.AgentData.SessionID != SessionId ||
+                            messagePacket.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    switch (Utils.BytesToString(messagePacket.MethodData.Method))
+                    {
+                        case "getinfo":
+                            if (((Scene)m_scene).Permissions.CanIssueEstateCommand(AgentId, false))
+                            {
+                                OnDetailedEstateDataRequest(this, messagePacket.MethodData.Invoice);
+                            }
+                            break;
+                        case "setregioninfo":
+                            if (((Scene)m_scene).Permissions.CanIssueEstateCommand(AgentId, false))
+                            {
+                                OnSetEstateFlagsRequest(convertParamStringToBool(messagePacket.ParamList[0].Parameter), convertParamStringToBool(messagePacket.ParamList[1].Parameter),
+                                                        convertParamStringToBool(messagePacket.ParamList[2].Parameter), !convertParamStringToBool(messagePacket.ParamList[3].Parameter),
+                                                        Convert.ToInt16(Convert.ToDecimal(Utils.BytesToString(messagePacket.ParamList[4].Parameter))),
+                                                        (float)Convert.ToDecimal(Utils.BytesToString(messagePacket.ParamList[5].Parameter)),
+                                                        Convert.ToInt16(Utils.BytesToString(messagePacket.ParamList[6].Parameter)),
+                                                        convertParamStringToBool(messagePacket.ParamList[7].Parameter), convertParamStringToBool(messagePacket.ParamList[8].Parameter));
+                            }
+                            break;
+                        //                            case "texturebase":
+                        //                                if (((Scene)m_scene).Permissions.CanIssueEstateCommand(AgentId, false))
+                        //                                {
+                        //                                    foreach (EstateOwnerMessagePacket.ParamListBlock block in messagePacket.ParamList)
+                        //                                    {
+                        //                                        string s = Utils.BytesToString(block.Parameter);
+                        //                                        string[] splitField = s.Split(' ');
+                        //                                        if (splitField.Length == 2)
+                        //                                        {
+                        //                                            UUID tempUUID = new UUID(splitField[1]);
+                        //                                            OnSetEstateTerrainBaseTexture(this, Convert.ToInt16(splitField[0]), tempUUID);
+                        //                                        }
+                        //                                    }
+                        //                                }
+                        //                                break;
+                        case "texturedetail":
+                            if (((Scene)m_scene).Permissions.CanIssueEstateCommand(AgentId, false))
+                            {
+                                foreach (EstateOwnerMessagePacket.ParamListBlock block in messagePacket.ParamList)
+                                {
+                                    string s = Utils.BytesToString(block.Parameter);
+                                    string[] splitField = s.Split(' ');
+                                    if (splitField.Length == 2)
+                                    {
+                                        Int16 corner = Convert.ToInt16(splitField[0]);
+                                        UUID textureUUID = new UUID(splitField[1]);
+
+                                        OnSetEstateTerrainDetailTexture(this, corner, textureUUID);
+                                    }
+                                }
+                            }
+
+                            break;
+                        case "textureheights":
+                            if (((Scene)m_scene).Permissions.CanIssueEstateCommand(AgentId, false))
+                            {
+                                foreach (EstateOwnerMessagePacket.ParamListBlock block in messagePacket.ParamList)
+                                {
+                                    string s = Utils.BytesToString(block.Parameter);
+                                    string[] splitField = s.Split(' ');
+                                    if (splitField.Length == 3)
+                                    {
+                                        Int16 corner = Convert.ToInt16(splitField[0]);
+                                        float lowValue = (float)Convert.ToDecimal(splitField[1]);
+                                        float highValue = (float)Convert.ToDecimal(splitField[2]);
+
+                                        OnSetEstateTerrainTextureHeights(this, corner, lowValue, highValue);
+                                    }
+                                }
+                            }
+                            break;
+                        case "texturecommit":
+                            OnCommitEstateTerrainTextureRequest(this);
+                            break;
+                        case "setregionterrain":
+                            if (((Scene)m_scene).Permissions.CanIssueEstateCommand(AgentId, false))
+                            {
+                                if (messagePacket.ParamList.Length != 9)
+                                {
+                                    m_log.Error("EstateOwnerMessage: SetRegionTerrain method has a ParamList of invalid length");
+                                }
+                                else
+                                {
+                                    try
+                                    {
+                                        string tmp = Utils.BytesToString(messagePacket.ParamList[0].Parameter);
+                                        if (!tmp.Contains(".")) tmp += ".00";
+                                        float WaterHeight = (float)Convert.ToDecimal(tmp);
+                                        tmp = Utils.BytesToString(messagePacket.ParamList[1].Parameter);
+                                        if (!tmp.Contains(".")) tmp += ".00";
+                                        float TerrainRaiseLimit = (float)Convert.ToDecimal(tmp);
+                                        tmp = Utils.BytesToString(messagePacket.ParamList[2].Parameter);
+                                        if (!tmp.Contains(".")) tmp += ".00";
+                                        float TerrainLowerLimit = (float)Convert.ToDecimal(tmp);
+                                        bool UseEstateSun = convertParamStringToBool(messagePacket.ParamList[3].Parameter);
+                                        bool UseFixedSun = convertParamStringToBool(messagePacket.ParamList[4].Parameter);
+                                        float SunHour = (float)Convert.ToDecimal(Utils.BytesToString(messagePacket.ParamList[5].Parameter));
+                                        bool UseGlobal = convertParamStringToBool(messagePacket.ParamList[6].Parameter);
+                                        bool EstateFixedSun = convertParamStringToBool(messagePacket.ParamList[7].Parameter);
+                                        float EstateSunHour = (float)Convert.ToDecimal(Utils.BytesToString(messagePacket.ParamList[8].Parameter));
+
+                                        OnSetRegionTerrainSettings(WaterHeight, TerrainRaiseLimit, TerrainLowerLimit, UseEstateSun, UseFixedSun, SunHour, UseGlobal, EstateFixedSun, EstateSunHour);
+
+                                    }
+                                    catch (Exception ex)
+                                    {
+                                        m_log.Error("EstateOwnerMessage: Exception while setting terrain settings: \n" + messagePacket + "\n" + ex);
+                                    }
+                                }
+                            }
+
+                            break;
+                        case "restart":
+                            if (((Scene)m_scene).Permissions.CanIssueEstateCommand(AgentId, false))
+                            {
+                                // There's only 1 block in the estateResetSim..   and that's the number of seconds till restart.
+                                foreach (EstateOwnerMessagePacket.ParamListBlock block in messagePacket.ParamList)
+                                {
+                                    float timeSeconds;
+                                    Utils.TryParseSingle(Utils.BytesToString(block.Parameter), out timeSeconds);
+                                    timeSeconds = (int)timeSeconds;
+                                    OnEstateRestartSimRequest(this, (int)timeSeconds);
+
+                                }
+                            }
+                            break;
+                        case "estatechangecovenantid":
+                            if (((Scene)m_scene).Permissions.CanIssueEstateCommand(AgentId, false))
+                            {
+                                foreach (EstateOwnerMessagePacket.ParamListBlock block in messagePacket.ParamList)
+                                {
+                                    UUID newCovenantID = new UUID(Utils.BytesToString(block.Parameter));
+                                    OnEstateChangeCovenantRequest(this, newCovenantID);
+                                }
+                            }
+                            break;
+                        case "estateaccessdelta": // Estate access delta manages the banlist and allow list too.
+                            if (((Scene)m_scene).Permissions.CanIssueEstateCommand(AgentId, false))
+                            {
+                                int estateAccessType = Convert.ToInt16(Utils.BytesToString(messagePacket.ParamList[1].Parameter));
+                                OnUpdateEstateAccessDeltaRequest(this, messagePacket.MethodData.Invoice, estateAccessType, new UUID(Utils.BytesToString(messagePacket.ParamList[2].Parameter)));
+
+                            }
+                            break;
+                        case "simulatormessage":
+                            if (((Scene)m_scene).Permissions.CanIssueEstateCommand(AgentId, false))
+                            {
+                                UUID invoice = messagePacket.MethodData.Invoice;
+                                UUID SenderID = new UUID(Utils.BytesToString(messagePacket.ParamList[2].Parameter));
+                                string SenderName = Utils.BytesToString(messagePacket.ParamList[3].Parameter);
+                                string Message = Utils.BytesToString(messagePacket.ParamList[4].Parameter);
+                                UUID sessionID = messagePacket.AgentData.SessionID;
+                                OnSimulatorBlueBoxMessageRequest(this, invoice, SenderID, sessionID, SenderName, Message);
+                            }
+                            break;
+                        case "instantmessage":
+                            if (((Scene)m_scene).Permissions.CanIssueEstateCommand(AgentId, false))
+                            {
+                                if (messagePacket.ParamList.Length < 5)
+                                    break;
+                                UUID invoice = messagePacket.MethodData.Invoice;
+                                UUID SenderID = new UUID(Utils.BytesToString(messagePacket.ParamList[2].Parameter));
+                                string SenderName = Utils.BytesToString(messagePacket.ParamList[3].Parameter);
+                                string Message = Utils.BytesToString(messagePacket.ParamList[4].Parameter);
+                                UUID sessionID = messagePacket.AgentData.SessionID;
+                                OnEstateBlueBoxMessageRequest(this, invoice, SenderID, sessionID, SenderName, Message);
+                            }
+                            break;
+                        case "setregiondebug":
+                            if (((Scene)m_scene).Permissions.CanIssueEstateCommand(AgentId, false))
+                            {
+                                UUID invoice = messagePacket.MethodData.Invoice;
+                                UUID SenderID = messagePacket.AgentData.AgentID;
+                                bool scripted = convertParamStringToBool(messagePacket.ParamList[0].Parameter);
+                                bool collisionEvents = convertParamStringToBool(messagePacket.ParamList[1].Parameter);
+                                bool physics = convertParamStringToBool(messagePacket.ParamList[2].Parameter);
+
+                                OnEstateDebugRegionRequest(this, invoice, SenderID, scripted, collisionEvents, physics);
+                            }
+                            break;
+                        case "teleporthomeuser":
+                            if (((Scene)m_scene).Permissions.CanIssueEstateCommand(AgentId, false))
+                            {
+                                UUID invoice = messagePacket.MethodData.Invoice;
+                                UUID SenderID = messagePacket.AgentData.AgentID;
+                                UUID Prey;
+
+                                UUID.TryParse(Utils.BytesToString(messagePacket.ParamList[1].Parameter), out Prey);
+
+                                OnEstateTeleportOneUserHomeRequest(this, invoice, SenderID, Prey);
+                            }
+                            break;
+                        case "teleporthomeallusers":
+                            if (((Scene)m_scene).Permissions.CanIssueEstateCommand(AgentId, false))
+                            {
+                                UUID invoice = messagePacket.MethodData.Invoice;
+                                UUID SenderID = messagePacket.AgentData.AgentID;
+                                OnEstateTeleportAllUsersHomeRequest(this, invoice, SenderID);
+                            }
+                            break;
+                        case "colliders":
+                            handlerLandStatRequest = OnLandStatRequest;
+                            if (handlerLandStatRequest != null)
+                            {
+                                handlerLandStatRequest(0, 1, 0, "", this);
+                            }
+                            break;
+                        case "scripts":
+                            handlerLandStatRequest = OnLandStatRequest;
+                            if (handlerLandStatRequest != null)
+                            {
+                                handlerLandStatRequest(0, 0, 0, "", this);
+                            }
+                            break;
+                        case "terrain":
+                            if (((Scene)m_scene).Permissions.CanIssueEstateCommand(AgentId, false))
+                            {
+                                if (messagePacket.ParamList.Length > 0)
+                                {
+                                    if (Utils.BytesToString(messagePacket.ParamList[0].Parameter) == "bake")
+                                    {
+                                        BakeTerrain handlerBakeTerrain = OnBakeTerrain;
+                                        if (handlerBakeTerrain != null)
+                                        {
+                                            handlerBakeTerrain(this);
+                                        }
+                                    }
+                                    if (Utils.BytesToString(messagePacket.ParamList[0].Parameter) == "download filename")
+                                    {
+                                        if (messagePacket.ParamList.Length > 1)
+                                        {
+                                            RequestTerrain handlerRequestTerrain = OnRequestTerrain;
+                                            if (handlerRequestTerrain != null)
+                                            {
+                                                handlerRequestTerrain(this, Utils.BytesToString(messagePacket.ParamList[1].Parameter));
+                                            }
+                                        }
+                                    }
+                                    if (Utils.BytesToString(messagePacket.ParamList[0].Parameter) == "upload filename")
+                                    {
+                                        if (messagePacket.ParamList.Length > 1)
+                                        {
+                                            RequestTerrain handlerUploadTerrain = OnUploadTerrain;
+                                            if (handlerUploadTerrain != null)
+                                            {
+                                                handlerUploadTerrain(this, Utils.BytesToString(messagePacket.ParamList[1].Parameter));
+                                            }
+                                        }
+                                    }
+
+                                }
+
+
+                            }
+                            break;
+
+                        case "estatechangeinfo":
+                            if (((Scene)m_scene).Permissions.CanIssueEstateCommand(AgentId, false))
+                            {
+                                UUID invoice = messagePacket.MethodData.Invoice;
+                                UUID SenderID = messagePacket.AgentData.AgentID;
+                                UInt32 param1 = Convert.ToUInt32(Utils.BytesToString(messagePacket.ParamList[1].Parameter));
+                                UInt32 param2 = Convert.ToUInt32(Utils.BytesToString(messagePacket.ParamList[2].Parameter));
+
+                                EstateChangeInfo handlerEstateChangeInfo = OnEstateChangeInfo;
+                                if (handlerEstateChangeInfo != null)
+                                {
+                                    handlerEstateChangeInfo(this, invoice, SenderID, param1, param2);
+                                }
+                            }
+                            break;
+
+                        default:
+                            m_log.Error("EstateOwnerMessage: Unknown method requested\n" + messagePacket);
+                            break;
+                    }
+
+                    //int parcelID, uint reportType, uint requestflags, string filter
+
+                    //lsrp.RequestData.ParcelLocalID;
+                    //lsrp.RequestData.ReportType; // 1 = colliders, 0 = scripts
+                    //lsrp.RequestData.RequestFlags;
+                    //lsrp.RequestData.Filter;
+
+                    break;
+
+                case PacketType.RequestRegionInfo:
+                    RequestRegionInfoPacket.AgentDataBlock mPacket = ((RequestRegionInfoPacket)Pack).AgentData;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (mPacket.SessionID != SessionId ||
+                            mPacket.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    RegionInfoRequest handlerRegionInfoRequest = OnRegionInfoRequest;
+                    if (handlerRegionInfoRequest != null)
+                    {
+                        handlerRegionInfoRequest(this);
+                    }
+                    break;
+                case PacketType.EstateCovenantRequest:
+
+                    //EstateCovenantRequestPacket.AgentDataBlock epack =
+                    //     ((EstateCovenantRequestPacket)Pack).AgentData;
+
+                    EstateCovenantRequest handlerEstateCovenantRequest = OnEstateCovenantRequest;
+                    if (handlerEstateCovenantRequest != null)
+                    {
+                        handlerEstateCovenantRequest(this);
+                    }
+                    break;
+
+                #endregion
+
+                #region GodPackets
+
+                case PacketType.RequestGodlikePowers:
+                    RequestGodlikePowersPacket rglpPack = (RequestGodlikePowersPacket)Pack;
+                    RequestGodlikePowersPacket.RequestBlockBlock rblock = rglpPack.RequestBlock;
+                    UUID token = rblock.Token;
+
+                    RequestGodlikePowersPacket.AgentDataBlock ablock = rglpPack.AgentData;
+
+                    RequestGodlikePowers handlerReqGodlikePowers = OnRequestGodlikePowers;
+
+                    if (handlerReqGodlikePowers != null)
+                    {
+                        handlerReqGodlikePowers(ablock.AgentID, ablock.SessionID, token, rblock.Godlike, this);
+                    }
+
+                    break;
+                case PacketType.GodKickUser:
+                    GodKickUserPacket gkupack = (GodKickUserPacket)Pack;
+
+                    if (gkupack.UserInfo.GodSessionID == SessionId && AgentId == gkupack.UserInfo.GodID)
+                    {
+                        GodKickUser handlerGodKickUser = OnGodKickUser;
+                        if (handlerGodKickUser != null)
+                        {
+                            handlerGodKickUser(gkupack.UserInfo.GodID, gkupack.UserInfo.GodSessionID,
+                                               gkupack.UserInfo.AgentID, (uint)0, gkupack.UserInfo.Reason);
+                        }
+                    }
+                    else
+                    {
+                        SendAgentAlertMessage("Kick request denied", false);
+                    }
+                    //KickUserPacket kupack = new KickUserPacket();
+                    //KickUserPacket.UserInfoBlock kupackib = kupack.UserInfo;
+
+                    //kupack.UserInfo.AgentID = gkupack.UserInfo.AgentID;
+                    //kupack.UserInfo.SessionID = gkupack.UserInfo.GodSessionID;
+
+                    //kupack.TargetBlock.TargetIP = (uint)0;
+                    //kupack.TargetBlock.TargetPort = (ushort)0;
+                    //kupack.UserInfo.Reason = gkupack.UserInfo.Reason;
+
+                    //OutPacket(kupack, ThrottleOutPacketType.Task);
+                    break;
+
+                #endregion
+
+                #region Economy/Transaction Packets
+
+                case PacketType.MoneyBalanceRequest:
+                    MoneyBalanceRequestPacket moneybalancerequestpacket = (MoneyBalanceRequestPacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (moneybalancerequestpacket.AgentData.SessionID != SessionId ||
+                            moneybalancerequestpacket.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    MoneyBalanceRequest handlerMoneyBalanceRequest = OnMoneyBalanceRequest;
+
+                    if (handlerMoneyBalanceRequest != null)
+                    {
+                        handlerMoneyBalanceRequest(this, moneybalancerequestpacket.AgentData.AgentID, moneybalancerequestpacket.AgentData.SessionID, moneybalancerequestpacket.MoneyData.TransactionID);
+                    }
+
+                    break;
+                case PacketType.EconomyDataRequest:
+
+
+                    EconomyDataRequest handlerEconomoyDataRequest = OnEconomyDataRequest;
+                    if (handlerEconomoyDataRequest != null)
+                    {
+                        handlerEconomoyDataRequest(AgentId);
+                    }
+                    break;
+                case PacketType.RequestPayPrice:
+                    RequestPayPricePacket requestPayPricePacket = (RequestPayPricePacket)Pack;
+
+                    RequestPayPrice handlerRequestPayPrice = OnRequestPayPrice;
+                    if (handlerRequestPayPrice != null)
+                    {
+                        handlerRequestPayPrice(this, requestPayPricePacket.ObjectData.ObjectID);
+                    }
+                    break;
+
+                case PacketType.ObjectSaleInfo:
+                    ObjectSaleInfoPacket objectSaleInfoPacket = (ObjectSaleInfoPacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (objectSaleInfoPacket.AgentData.SessionID != SessionId ||
+                            objectSaleInfoPacket.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    ObjectSaleInfo handlerObjectSaleInfo = OnObjectSaleInfo;
+                    if (handlerObjectSaleInfo != null)
+                    {
+                        foreach (ObjectSaleInfoPacket.ObjectDataBlock d
+                            in objectSaleInfoPacket.ObjectData)
+                        {
+                            handlerObjectSaleInfo(this,
+                                                  objectSaleInfoPacket.AgentData.AgentID,
+                                                  objectSaleInfoPacket.AgentData.SessionID,
+                                                  d.LocalID,
+                                                  d.SaleType,
+                                                  d.SalePrice);
+                        }
+                    }
+                    break;
+
+                case PacketType.ObjectBuy:
+                    ObjectBuyPacket objectBuyPacket = (ObjectBuyPacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (objectBuyPacket.AgentData.SessionID != SessionId ||
+                            objectBuyPacket.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    ObjectBuy handlerObjectBuy = OnObjectBuy;
+
+                    if (handlerObjectBuy != null)
+                    {
+                        foreach (ObjectBuyPacket.ObjectDataBlock d
+                            in objectBuyPacket.ObjectData)
+                        {
+                            handlerObjectBuy(this,
+                                             objectBuyPacket.AgentData.AgentID,
+                                             objectBuyPacket.AgentData.SessionID,
+                                             objectBuyPacket.AgentData.GroupID,
+                                             objectBuyPacket.AgentData.CategoryID,
+                                             d.ObjectLocalID,
+                                             d.SaleType,
+                                             d.SalePrice);
+                        }
+                    }
+                    break;
+
+                #endregion
+
+                #region Script Packets
+
+                case PacketType.GetScriptRunning:
+                    GetScriptRunningPacket scriptRunning = (GetScriptRunningPacket)Pack;
+
+                    GetScriptRunning handlerGetScriptRunning = OnGetScriptRunning;
+                    if (handlerGetScriptRunning != null)
+                    {
+                        handlerGetScriptRunning(this, scriptRunning.Script.ObjectID, scriptRunning.Script.ItemID);
+                    }
+                    break;
+
+                case PacketType.SetScriptRunning:
+                    SetScriptRunningPacket setScriptRunning = (SetScriptRunningPacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (setScriptRunning.AgentData.SessionID != SessionId ||
+                            setScriptRunning.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    SetScriptRunning handlerSetScriptRunning = OnSetScriptRunning;
+                    if (handlerSetScriptRunning != null)
+                    {
+                        handlerSetScriptRunning(this, setScriptRunning.Script.ObjectID, setScriptRunning.Script.ItemID, setScriptRunning.Script.Running);
+                    }
+                    break;
+
+                case PacketType.ScriptReset:
+                    ScriptResetPacket scriptResetPacket = (ScriptResetPacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (scriptResetPacket.AgentData.SessionID != SessionId ||
+                            scriptResetPacket.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    ScriptReset handlerScriptReset = OnScriptReset;
+                    if (handlerScriptReset != null)
+                    {
+                        handlerScriptReset(this, scriptResetPacket.Script.ObjectID, scriptResetPacket.Script.ItemID);
+                    }
+                    break;
+
+                #endregion
+
+                #region Gesture Managment
+
+                case PacketType.ActivateGestures:
+                    ActivateGesturesPacket activateGesturePacket = (ActivateGesturesPacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (activateGesturePacket.AgentData.SessionID != SessionId ||
+                            activateGesturePacket.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    ActivateGesture handlerActivateGesture = OnActivateGesture;
+                    if (handlerActivateGesture != null)
+                    {
+                        handlerActivateGesture(this,
+                                               activateGesturePacket.Data[0].AssetID,
+                                               activateGesturePacket.Data[0].ItemID);
+                    }
+                    else m_log.Error("Null pointer for activateGesture");
+
+                    break;
+
+                case PacketType.DeactivateGestures:
+                    DeactivateGesturesPacket deactivateGesturePacket = (DeactivateGesturesPacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (deactivateGesturePacket.AgentData.SessionID != SessionId ||
+                            deactivateGesturePacket.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    DeactivateGesture handlerDeactivateGesture = OnDeactivateGesture;
+                    if (handlerDeactivateGesture != null)
+                    {
+                        handlerDeactivateGesture(this, deactivateGesturePacket.Data[0].ItemID);
+                    }
+                    break;
+                case PacketType.ObjectOwner:
+                    ObjectOwnerPacket objectOwnerPacket = (ObjectOwnerPacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (objectOwnerPacket.AgentData.SessionID != SessionId ||
+                            objectOwnerPacket.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    List<uint> localIDs = new List<uint>();
+
+                    foreach (ObjectOwnerPacket.ObjectDataBlock d in objectOwnerPacket.ObjectData)
+                        localIDs.Add(d.ObjectLocalID);
+
+                    ObjectOwner handlerObjectOwner = OnObjectOwner;
+                    if (handlerObjectOwner != null)
+                    {
+                        handlerObjectOwner(this, objectOwnerPacket.HeaderData.OwnerID, objectOwnerPacket.HeaderData.GroupID, localIDs);
+                    }
+                    break;
+
+                #endregion
+
+                case PacketType.AgentFOV:
+                    AgentFOVPacket fovPacket = (AgentFOVPacket)Pack;
+
+                    if (fovPacket.FOVBlock.GenCounter > m_agentFOVCounter)
+                    {
+                        m_agentFOVCounter = fovPacket.FOVBlock.GenCounter;
+                        AgentFOV handlerAgentFOV = OnAgentFOV;
+                        if (handlerAgentFOV != null)
+                        {
+                            handlerAgentFOV(this, fovPacket.FOVBlock.VerticalAngle);
+                        }
+                    }
+                    break;
+
+                #region unimplemented handlers
+
+                case PacketType.ViewerStats:
+                    // TODO: handle this packet
+                    //m_log.Warn("[CLIENT]: unhandled ViewerStats packet");
+                    break;
+
+                case PacketType.MapItemRequest:
+                    MapItemRequestPacket mirpk = (MapItemRequestPacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (mirpk.AgentData.SessionID != SessionId ||
+                            mirpk.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    //m_log.Debug(mirpk.ToString());
+                    MapItemRequest handlerMapItemRequest = OnMapItemRequest;
+                    if (handlerMapItemRequest != null)
+                    {
+                        handlerMapItemRequest(this, mirpk.AgentData.Flags, mirpk.AgentData.EstateID,
+                                              mirpk.AgentData.Godlike, mirpk.RequestData.ItemType,
+                                              mirpk.RequestData.RegionHandle);
+
+                    }
+                    break;
+
+                case PacketType.TransferAbort:
+                    // TODO: handle this packet
+                    //m_log.Warn("[CLIENT]: unhandled TransferAbort packet");
+                    break;
+                case PacketType.MuteListRequest:
+                    MuteListRequestPacket muteListRequest =
+                            (MuteListRequestPacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (muteListRequest.AgentData.SessionID != SessionId ||
+                            muteListRequest.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    MuteListRequest handlerMuteListRequest = OnMuteListRequest;
+                    if (handlerMuteListRequest != null)
+                    {
+                        handlerMuteListRequest(this, muteListRequest.MuteData.MuteCRC);
+                    }
+                    else
+                    {
+                        SendUseCachedMuteList();
+                    }
+                    break;
+                case PacketType.UseCircuitCode:
+                    // Don't display this one, we handle it at a lower level
+                    break;
+
+                case PacketType.AgentHeightWidth:
+                    // TODO: handle this packet
+                    //m_log.Warn("[CLIENT]: unhandled AgentHeightWidth packet");
+                    break;
+
+                case PacketType.InventoryDescendents:
+                    // TODO: handle this packet
+                    //m_log.Warn("[CLIENT]: unhandled InventoryDescent packet");
+
+                    break;
+                case PacketType.DirPlacesQuery:
+                    DirPlacesQueryPacket dirPlacesQueryPacket = (DirPlacesQueryPacket)Pack;
+                    //m_log.Debug(dirPlacesQueryPacket.ToString());
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (dirPlacesQueryPacket.AgentData.SessionID != SessionId ||
+                            dirPlacesQueryPacket.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    DirPlacesQuery handlerDirPlacesQuery = OnDirPlacesQuery;
+                    if (handlerDirPlacesQuery != null)
+                    {
+                        handlerDirPlacesQuery(this,
+                                              dirPlacesQueryPacket.QueryData.QueryID,
+                                              Utils.BytesToString(
+                                                  dirPlacesQueryPacket.QueryData.QueryText),
+                                              (int)dirPlacesQueryPacket.QueryData.QueryFlags,
+                                              (int)dirPlacesQueryPacket.QueryData.Category,
+                                              Utils.BytesToString(
+                                                  dirPlacesQueryPacket.QueryData.SimName),
+                                              dirPlacesQueryPacket.QueryData.QueryStart);
+                    }
+                    break;
+                case PacketType.DirFindQuery:
+                    DirFindQueryPacket dirFindQueryPacket = (DirFindQueryPacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (dirFindQueryPacket.AgentData.SessionID != SessionId ||
+                            dirFindQueryPacket.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    DirFindQuery handlerDirFindQuery = OnDirFindQuery;
+                    if (handlerDirFindQuery != null)
+                    {
+                        handlerDirFindQuery(this,
+                                            dirFindQueryPacket.QueryData.QueryID,
+                                            Utils.BytesToString(
+                                                dirFindQueryPacket.QueryData.QueryText),
+                                            dirFindQueryPacket.QueryData.QueryFlags,
+                                            dirFindQueryPacket.QueryData.QueryStart);
+                    }
+                    break;
+                case PacketType.DirLandQuery:
+                    DirLandQueryPacket dirLandQueryPacket = (DirLandQueryPacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (dirLandQueryPacket.AgentData.SessionID != SessionId ||
+                            dirLandQueryPacket.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    DirLandQuery handlerDirLandQuery = OnDirLandQuery;
+                    if (handlerDirLandQuery != null)
+                    {
+                        handlerDirLandQuery(this,
+                                            dirLandQueryPacket.QueryData.QueryID,
+                                            dirLandQueryPacket.QueryData.QueryFlags,
+                                            dirLandQueryPacket.QueryData.SearchType,
+                                            dirLandQueryPacket.QueryData.Price,
+                                            dirLandQueryPacket.QueryData.Area,
+                                            dirLandQueryPacket.QueryData.QueryStart);
+                    }
+                    break;
+                case PacketType.DirPopularQuery:
+                    DirPopularQueryPacket dirPopularQueryPacket = (DirPopularQueryPacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (dirPopularQueryPacket.AgentData.SessionID != SessionId ||
+                            dirPopularQueryPacket.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    DirPopularQuery handlerDirPopularQuery = OnDirPopularQuery;
+                    if (handlerDirPopularQuery != null)
+                    {
+                        handlerDirPopularQuery(this,
+                                               dirPopularQueryPacket.QueryData.QueryID,
+                                               dirPopularQueryPacket.QueryData.QueryFlags);
+                    }
+                    break;
+                case PacketType.DirClassifiedQuery:
+                    DirClassifiedQueryPacket dirClassifiedQueryPacket = (DirClassifiedQueryPacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (dirClassifiedQueryPacket.AgentData.SessionID != SessionId ||
+                            dirClassifiedQueryPacket.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    DirClassifiedQuery handlerDirClassifiedQuery = OnDirClassifiedQuery;
+                    if (handlerDirClassifiedQuery != null)
+                    {
+                        handlerDirClassifiedQuery(this,
+                                                  dirClassifiedQueryPacket.QueryData.QueryID,
+                                                  Utils.BytesToString(
+                                                      dirClassifiedQueryPacket.QueryData.QueryText),
+                                                  dirClassifiedQueryPacket.QueryData.QueryFlags,
+                                                  dirClassifiedQueryPacket.QueryData.Category,
+                                                  dirClassifiedQueryPacket.QueryData.QueryStart);
+                    }
+                    break;
+                case PacketType.EventInfoRequest:
+                    EventInfoRequestPacket eventInfoRequestPacket = (EventInfoRequestPacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (eventInfoRequestPacket.AgentData.SessionID != SessionId ||
+                            eventInfoRequestPacket.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    if (OnEventInfoRequest != null)
+                    {
+                        OnEventInfoRequest(this, eventInfoRequestPacket.EventData.EventID);
+                    }
+                    break;
+
+                #region Calling Card
+
+                case PacketType.OfferCallingCard:
+                    OfferCallingCardPacket offerCallingCardPacket = (OfferCallingCardPacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (offerCallingCardPacket.AgentData.SessionID != SessionId ||
+                            offerCallingCardPacket.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    if (OnOfferCallingCard != null)
+                    {
+                        OnOfferCallingCard(this,
+                                           offerCallingCardPacket.AgentBlock.DestID,
+                                           offerCallingCardPacket.AgentBlock.TransactionID);
+                    }
+                    break;
+
+                case PacketType.AcceptCallingCard:
+                    AcceptCallingCardPacket acceptCallingCardPacket = (AcceptCallingCardPacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (acceptCallingCardPacket.AgentData.SessionID != SessionId ||
+                            acceptCallingCardPacket.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    // according to http://wiki.secondlife.com/wiki/AcceptCallingCard FolderData should
+                    // contain exactly one entry
+                    if (OnAcceptCallingCard != null && acceptCallingCardPacket.FolderData.Length > 0)
+                    {
+                        OnAcceptCallingCard(this,
+                                            acceptCallingCardPacket.TransactionBlock.TransactionID,
+                                            acceptCallingCardPacket.FolderData[0].FolderID);
+                    }
+                    break;
+
+                case PacketType.DeclineCallingCard:
+                    DeclineCallingCardPacket declineCallingCardPacket = (DeclineCallingCardPacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (declineCallingCardPacket.AgentData.SessionID != SessionId ||
+                            declineCallingCardPacket.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    if (OnDeclineCallingCard != null)
+                    {
+                        OnDeclineCallingCard(this,
+                                             declineCallingCardPacket.TransactionBlock.TransactionID);
+                    }
+                    break;
+                #endregion
+
+                #region Groups
+                case PacketType.ActivateGroup:
+                    ActivateGroupPacket activateGroupPacket = (ActivateGroupPacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (activateGroupPacket.AgentData.SessionID != SessionId ||
+                            activateGroupPacket.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    if (m_GroupsModule != null)
+                    {
+                        m_GroupsModule.ActivateGroup(this, activateGroupPacket.AgentData.GroupID);
+                        m_GroupsModule.SendAgentGroupDataUpdate(this);
+                    }
+                    break;
+
+                case PacketType.GroupTitlesRequest:
+                    GroupTitlesRequestPacket groupTitlesRequest =
+                        (GroupTitlesRequestPacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (groupTitlesRequest.AgentData.SessionID != SessionId ||
+                            groupTitlesRequest.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    if (m_GroupsModule != null)
+                    {
+                        GroupTitlesReplyPacket groupTitlesReply = (GroupTitlesReplyPacket)PacketPool.Instance.GetPacket(PacketType.GroupTitlesReply);
+
+                        groupTitlesReply.AgentData =
+                            new GroupTitlesReplyPacket.AgentDataBlock();
+
+                        groupTitlesReply.AgentData.AgentID = AgentId;
+                        groupTitlesReply.AgentData.GroupID =
+                            groupTitlesRequest.AgentData.GroupID;
+
+                        groupTitlesReply.AgentData.RequestID =
+                            groupTitlesRequest.AgentData.RequestID;
+
+                        List<GroupTitlesData> titles =
+                            m_GroupsModule.GroupTitlesRequest(this,
+                                                              groupTitlesRequest.AgentData.GroupID);
+
+                        groupTitlesReply.GroupData =
+                            new GroupTitlesReplyPacket.GroupDataBlock[titles.Count];
+
+                        int i = 0;
+                        foreach (GroupTitlesData d in titles)
+                        {
+                            groupTitlesReply.GroupData[i] =
+                                new GroupTitlesReplyPacket.GroupDataBlock();
+
+                            groupTitlesReply.GroupData[i].Title =
+                                Util.StringToBytes256(d.Name);
+                            groupTitlesReply.GroupData[i].RoleID =
+                                d.UUID;
+                            groupTitlesReply.GroupData[i].Selected =
+                                d.Selected;
+                            i++;
+                        }
+
+                        OutPacket(groupTitlesReply, ThrottleOutPacketType.Task);
+                    }
+                    break;
+
+                case PacketType.GroupProfileRequest:
+                    GroupProfileRequestPacket groupProfileRequest =
+                        (GroupProfileRequestPacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (groupProfileRequest.AgentData.SessionID != SessionId ||
+                            groupProfileRequest.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    if (m_GroupsModule != null)
+                    {
+                        GroupProfileReplyPacket groupProfileReply = (GroupProfileReplyPacket)PacketPool.Instance.GetPacket(PacketType.GroupProfileReply);
+
+                        groupProfileReply.AgentData = new GroupProfileReplyPacket.AgentDataBlock();
+                        groupProfileReply.GroupData = new GroupProfileReplyPacket.GroupDataBlock();
+                        groupProfileReply.AgentData.AgentID = AgentId;
+
+                        GroupProfileData d = m_GroupsModule.GroupProfileRequest(this,
+                                                                                groupProfileRequest.GroupData.GroupID);
+
+                        groupProfileReply.GroupData.GroupID = d.GroupID;
+                        groupProfileReply.GroupData.Name = Util.StringToBytes256(d.Name);
+                        groupProfileReply.GroupData.Charter = Util.StringToBytes1024(d.Charter);
+                        groupProfileReply.GroupData.ShowInList = d.ShowInList;
+                        groupProfileReply.GroupData.MemberTitle = Util.StringToBytes256(d.MemberTitle);
+                        groupProfileReply.GroupData.PowersMask = d.PowersMask;
+                        groupProfileReply.GroupData.InsigniaID = d.InsigniaID;
+                        groupProfileReply.GroupData.FounderID = d.FounderID;
+                        groupProfileReply.GroupData.MembershipFee = d.MembershipFee;
+                        groupProfileReply.GroupData.OpenEnrollment = d.OpenEnrollment;
+                        groupProfileReply.GroupData.Money = d.Money;
+                        groupProfileReply.GroupData.GroupMembershipCount = d.GroupMembershipCount;
+                        groupProfileReply.GroupData.GroupRolesCount = d.GroupRolesCount;
+                        groupProfileReply.GroupData.AllowPublish = d.AllowPublish;
+                        groupProfileReply.GroupData.MaturePublish = d.MaturePublish;
+                        groupProfileReply.GroupData.OwnerRole = d.OwnerRole;
+
+                        OutPacket(groupProfileReply, ThrottleOutPacketType.Task);
+                    }
+                    break;
+
+                case PacketType.GroupMembersRequest:
+                    GroupMembersRequestPacket groupMembersRequestPacket =
+                        (GroupMembersRequestPacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (groupMembersRequestPacket.AgentData.SessionID != SessionId ||
+                            groupMembersRequestPacket.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    if (m_GroupsModule != null)
+                    {
+                        List<GroupMembersData> members =
+                            m_GroupsModule.GroupMembersRequest(this, groupMembersRequestPacket.GroupData.GroupID);
+
+                        int memberCount = members.Count;
+
+                        while (true)
+                        {
+                            int blockCount = members.Count;
+                            if (blockCount > 40)
+                                blockCount = 40;
+
+                            GroupMembersReplyPacket groupMembersReply = (GroupMembersReplyPacket)PacketPool.Instance.GetPacket(PacketType.GroupMembersReply);
+
+                            groupMembersReply.AgentData =
+                                new GroupMembersReplyPacket.AgentDataBlock();
+                            groupMembersReply.GroupData =
+                                new GroupMembersReplyPacket.GroupDataBlock();
+                            groupMembersReply.MemberData =
+                                new GroupMembersReplyPacket.MemberDataBlock[
+                                    blockCount];
+
+                            groupMembersReply.AgentData.AgentID = AgentId;
+                            groupMembersReply.GroupData.GroupID =
+                                groupMembersRequestPacket.GroupData.GroupID;
+                            groupMembersReply.GroupData.RequestID =
+                                groupMembersRequestPacket.GroupData.RequestID;
+                            groupMembersReply.GroupData.MemberCount = memberCount;
+
+                            for (int i = 0; i < blockCount; i++)
+                            {
+                                GroupMembersData m = members[0];
+                                members.RemoveAt(0);
+
+                                groupMembersReply.MemberData[i] =
+                                    new GroupMembersReplyPacket.MemberDataBlock();
+                                groupMembersReply.MemberData[i].AgentID =
+                                    m.AgentID;
+                                groupMembersReply.MemberData[i].Contribution =
+                                    m.Contribution;
+                                groupMembersReply.MemberData[i].OnlineStatus =
+                                    Util.StringToBytes256(m.OnlineStatus);
+                                groupMembersReply.MemberData[i].AgentPowers =
+                                    m.AgentPowers;
+                                groupMembersReply.MemberData[i].Title =
+                                    Util.StringToBytes256(m.Title);
+                                groupMembersReply.MemberData[i].IsOwner =
+                                    m.IsOwner;
+                            }
+                            OutPacket(groupMembersReply, ThrottleOutPacketType.Task);
+                            if (members.Count == 0)
+                                break;
+                        }
+                    }
+                    break;
+
+                case PacketType.GroupRoleDataRequest:
+                    GroupRoleDataRequestPacket groupRolesRequest =
+                        (GroupRoleDataRequestPacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (groupRolesRequest.AgentData.SessionID != SessionId ||
+                            groupRolesRequest.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    if (m_GroupsModule != null)
+                    {
+                        GroupRoleDataReplyPacket groupRolesReply = (GroupRoleDataReplyPacket)PacketPool.Instance.GetPacket(PacketType.GroupRoleDataReply);
+
+                        groupRolesReply.AgentData =
+                            new GroupRoleDataReplyPacket.AgentDataBlock();
+
+                        groupRolesReply.AgentData.AgentID = AgentId;
+
+                        groupRolesReply.GroupData =
+                            new GroupRoleDataReplyPacket.GroupDataBlock();
+
+                        groupRolesReply.GroupData.GroupID =
+                            groupRolesRequest.GroupData.GroupID;
+
+                        groupRolesReply.GroupData.RequestID =
+                            groupRolesRequest.GroupData.RequestID;
+
+                        List<GroupRolesData> titles =
+                            m_GroupsModule.GroupRoleDataRequest(this,
+                                                                groupRolesRequest.GroupData.GroupID);
+
+                        groupRolesReply.GroupData.RoleCount =
+                            titles.Count;
+
+                        groupRolesReply.RoleData =
+                            new GroupRoleDataReplyPacket.RoleDataBlock[titles.Count];
+
+                        int i = 0;
+                        foreach (GroupRolesData d in titles)
+                        {
+                            groupRolesReply.RoleData[i] =
+                                new GroupRoleDataReplyPacket.RoleDataBlock();
+
+                            groupRolesReply.RoleData[i].RoleID =
+                                d.RoleID;
+                            groupRolesReply.RoleData[i].Name =
+                                Util.StringToBytes256(d.Name);
+                            groupRolesReply.RoleData[i].Title =
+                                Util.StringToBytes256(d.Title);
+                            groupRolesReply.RoleData[i].Description =
+                                Util.StringToBytes1024(d.Description);
+                            groupRolesReply.RoleData[i].Powers =
+                                d.Powers;
+                            groupRolesReply.RoleData[i].Members =
+                                (uint)d.Members;
+
+                            i++;
+                        }
+
+                        OutPacket(groupRolesReply, ThrottleOutPacketType.Task);
+                    }
+                    break;
+
+                case PacketType.GroupRoleMembersRequest:
+                    GroupRoleMembersRequestPacket groupRoleMembersRequest =
+                        (GroupRoleMembersRequestPacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (groupRoleMembersRequest.AgentData.SessionID != SessionId ||
+                            groupRoleMembersRequest.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    if (m_GroupsModule != null)
+                    {
+                        List<GroupRoleMembersData> mappings =
+                                m_GroupsModule.GroupRoleMembersRequest(this,
+                                groupRoleMembersRequest.GroupData.GroupID);
+
+                        int mappingsCount = mappings.Count;
+
+                        while (mappings.Count > 0)
+                        {
+                            int pairs = mappings.Count;
+                            if (pairs > 32)
+                                pairs = 32;
+
+                            GroupRoleMembersReplyPacket groupRoleMembersReply = (GroupRoleMembersReplyPacket)PacketPool.Instance.GetPacket(PacketType.GroupRoleMembersReply);
+                            groupRoleMembersReply.AgentData =
+                                    new GroupRoleMembersReplyPacket.AgentDataBlock();
+                            groupRoleMembersReply.AgentData.AgentID =
+                                    AgentId;
+                            groupRoleMembersReply.AgentData.GroupID =
+                                    groupRoleMembersRequest.GroupData.GroupID;
+                            groupRoleMembersReply.AgentData.RequestID =
+                                    groupRoleMembersRequest.GroupData.RequestID;
+
+                            groupRoleMembersReply.AgentData.TotalPairs =
+                                    (uint)mappingsCount;
+
+                            groupRoleMembersReply.MemberData =
+                                    new GroupRoleMembersReplyPacket.MemberDataBlock[pairs];
+
+                            for (int i = 0; i < pairs; i++)
+                            {
+                                GroupRoleMembersData d = mappings[0];
+                                mappings.RemoveAt(0);
+
+                                groupRoleMembersReply.MemberData[i] =
+                                    new GroupRoleMembersReplyPacket.MemberDataBlock();
+
+                                groupRoleMembersReply.MemberData[i].RoleID =
+                                        d.RoleID;
+                                groupRoleMembersReply.MemberData[i].MemberID =
+                                        d.MemberID;
+                            }
+
+                            OutPacket(groupRoleMembersReply, ThrottleOutPacketType.Task);
+                        }
+                    }
+                    break;
+
+                case PacketType.CreateGroupRequest:
+                    CreateGroupRequestPacket createGroupRequest =
+                        (CreateGroupRequestPacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (createGroupRequest.AgentData.SessionID != SessionId ||
+                            createGroupRequest.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    if (m_GroupsModule != null)
+                    {
+                        m_GroupsModule.CreateGroup(this,
+                                                   Utils.BytesToString(createGroupRequest.GroupData.Name),
+                                                   Utils.BytesToString(createGroupRequest.GroupData.Charter),
+                                                   createGroupRequest.GroupData.ShowInList,
+                                                   createGroupRequest.GroupData.InsigniaID,
+                                                   createGroupRequest.GroupData.MembershipFee,
+                                                   createGroupRequest.GroupData.OpenEnrollment,
+                                                   createGroupRequest.GroupData.AllowPublish,
+                                                   createGroupRequest.GroupData.MaturePublish);
+                    }
+                    break;
+
+                case PacketType.UpdateGroupInfo:
+                    UpdateGroupInfoPacket updateGroupInfo =
+                        (UpdateGroupInfoPacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (updateGroupInfo.AgentData.SessionID != SessionId ||
+                            updateGroupInfo.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    if (m_GroupsModule != null)
+                    {
+                        m_GroupsModule.UpdateGroupInfo(this,
+                                                       updateGroupInfo.GroupData.GroupID,
+                                                       Utils.BytesToString(updateGroupInfo.GroupData.Charter),
+                                                       updateGroupInfo.GroupData.ShowInList,
+                                                       updateGroupInfo.GroupData.InsigniaID,
+                                                       updateGroupInfo.GroupData.MembershipFee,
+                                                       updateGroupInfo.GroupData.OpenEnrollment,
+                                                       updateGroupInfo.GroupData.AllowPublish,
+                                                       updateGroupInfo.GroupData.MaturePublish);
+                    }
+
+                    break;
+
+                case PacketType.SetGroupAcceptNotices:
+                    SetGroupAcceptNoticesPacket setGroupAcceptNotices =
+                        (SetGroupAcceptNoticesPacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (setGroupAcceptNotices.AgentData.SessionID != SessionId ||
+                            setGroupAcceptNotices.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    if (m_GroupsModule != null)
+                    {
+                        m_GroupsModule.SetGroupAcceptNotices(this,
+                                                             setGroupAcceptNotices.Data.GroupID,
+                                                             setGroupAcceptNotices.Data.AcceptNotices,
+                                                             setGroupAcceptNotices.NewData.ListInProfile);
+                    }
+
+                    break;
+
+                case PacketType.GroupTitleUpdate:
+                    GroupTitleUpdatePacket groupTitleUpdate =
+                        (GroupTitleUpdatePacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (groupTitleUpdate.AgentData.SessionID != SessionId ||
+                            groupTitleUpdate.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    if (m_GroupsModule != null)
+                    {
+                        m_GroupsModule.GroupTitleUpdate(this,
+                                                        groupTitleUpdate.AgentData.GroupID,
+                                                        groupTitleUpdate.AgentData.TitleRoleID);
+                    }
+
+                    break;
+
+
+                case PacketType.ParcelDeedToGroup:
+                    ParcelDeedToGroupPacket parcelDeedToGroup = (ParcelDeedToGroupPacket)Pack;
+                    if (m_GroupsModule != null)
+                    {
+                        ParcelDeedToGroup handlerParcelDeedToGroup = OnParcelDeedToGroup;
+                        if (handlerParcelDeedToGroup != null)
+                        {
+                            handlerParcelDeedToGroup(parcelDeedToGroup.Data.LocalID, parcelDeedToGroup.Data.GroupID, this);
+
+                        }
+                    }
+
+                    break;
+
+
+                case PacketType.GroupNoticesListRequest:
+                    GroupNoticesListRequestPacket groupNoticesListRequest =
+                        (GroupNoticesListRequestPacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (groupNoticesListRequest.AgentData.SessionID != SessionId ||
+                            groupNoticesListRequest.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    if (m_GroupsModule != null)
+                    {
+                        GroupNoticeData[] gn =
+                            m_GroupsModule.GroupNoticesListRequest(this,
+                                                                   groupNoticesListRequest.Data.GroupID);
+
+                        GroupNoticesListReplyPacket groupNoticesListReply = (GroupNoticesListReplyPacket)PacketPool.Instance.GetPacket(PacketType.GroupNoticesListReply);
+                        groupNoticesListReply.AgentData =
+                            new GroupNoticesListReplyPacket.AgentDataBlock();
+                        groupNoticesListReply.AgentData.AgentID = AgentId;
+                        groupNoticesListReply.AgentData.GroupID = groupNoticesListRequest.Data.GroupID;
+
+                        groupNoticesListReply.Data = new GroupNoticesListReplyPacket.DataBlock[gn.Length];
+
+                        int i = 0;
+                        foreach (GroupNoticeData g in gn)
+                        {
+                            groupNoticesListReply.Data[i] = new GroupNoticesListReplyPacket.DataBlock();
+                            groupNoticesListReply.Data[i].NoticeID =
+                                g.NoticeID;
+                            groupNoticesListReply.Data[i].Timestamp =
+                                g.Timestamp;
+                            groupNoticesListReply.Data[i].FromName =
+                                Util.StringToBytes256(g.FromName);
+                            groupNoticesListReply.Data[i].Subject =
+                                Util.StringToBytes256(g.Subject);
+                            groupNoticesListReply.Data[i].HasAttachment =
+                                g.HasAttachment;
+                            groupNoticesListReply.Data[i].AssetType =
+                                g.AssetType;
+                            i++;
+                        }
+
+                        OutPacket(groupNoticesListReply, ThrottleOutPacketType.Task);
+                    }
+
+                    break;
+                case PacketType.GroupNoticeRequest:
+                    GroupNoticeRequestPacket groupNoticeRequest =
+                        (GroupNoticeRequestPacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (groupNoticeRequest.AgentData.SessionID != SessionId ||
+                            groupNoticeRequest.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    if (m_GroupsModule != null)
+                    {
+                        m_GroupsModule.GroupNoticeRequest(this,
+                                                          groupNoticeRequest.Data.GroupNoticeID);
+                    }
+                    break;
+
+                case PacketType.GroupRoleUpdate:
+                    GroupRoleUpdatePacket groupRoleUpdate =
+                        (GroupRoleUpdatePacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (groupRoleUpdate.AgentData.SessionID != SessionId ||
+                            groupRoleUpdate.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    if (m_GroupsModule != null)
+                    {
+                        foreach (GroupRoleUpdatePacket.RoleDataBlock d in
+                            groupRoleUpdate.RoleData)
+                        {
+                            m_GroupsModule.GroupRoleUpdate(this,
+                                                           groupRoleUpdate.AgentData.GroupID,
+                                                           d.RoleID,
+                                                           Utils.BytesToString(d.Name),
+                                                           Utils.BytesToString(d.Description),
+                                                           Utils.BytesToString(d.Title),
+                                                           d.Powers,
+                                                           d.UpdateType);
+                        }
+                        m_GroupsModule.NotifyChange(groupRoleUpdate.AgentData.GroupID);
+                    }
+                    break;
+
+                case PacketType.GroupRoleChanges:
+                    GroupRoleChangesPacket groupRoleChanges =
+                        (GroupRoleChangesPacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (groupRoleChanges.AgentData.SessionID != SessionId ||
+                            groupRoleChanges.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    if (m_GroupsModule != null)
+                    {
+                        foreach (GroupRoleChangesPacket.RoleChangeBlock d in
+                            groupRoleChanges.RoleChange)
+                        {
+                            m_GroupsModule.GroupRoleChanges(this,
+                                                            groupRoleChanges.AgentData.GroupID,
+                                                            d.RoleID,
+                                                            d.MemberID,
+                                                            d.Change);
+                        }
+                        m_GroupsModule.NotifyChange(groupRoleChanges.AgentData.GroupID);
+                    }
+                    break;
+
+                case PacketType.JoinGroupRequest:
+                    JoinGroupRequestPacket joinGroupRequest =
+                        (JoinGroupRequestPacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (joinGroupRequest.AgentData.SessionID != SessionId ||
+                            joinGroupRequest.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    if (m_GroupsModule != null)
+                    {
+                        m_GroupsModule.JoinGroupRequest(this,
+                                joinGroupRequest.GroupData.GroupID);
+                    }
+                    break;
+
+                case PacketType.LeaveGroupRequest:
+                    LeaveGroupRequestPacket leaveGroupRequest =
+                        (LeaveGroupRequestPacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (leaveGroupRequest.AgentData.SessionID != SessionId ||
+                            leaveGroupRequest.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    if (m_GroupsModule != null)
+                    {
+                        m_GroupsModule.LeaveGroupRequest(this,
+                                leaveGroupRequest.GroupData.GroupID);
+                    }
+                    break;
+
+                case PacketType.EjectGroupMemberRequest:
+                    EjectGroupMemberRequestPacket ejectGroupMemberRequest =
+                        (EjectGroupMemberRequestPacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (ejectGroupMemberRequest.AgentData.SessionID != SessionId ||
+                            ejectGroupMemberRequest.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    if (m_GroupsModule != null)
+                    {
+                        foreach (EjectGroupMemberRequestPacket.EjectDataBlock e
+                                in ejectGroupMemberRequest.EjectData)
+                        {
+                            m_GroupsModule.EjectGroupMemberRequest(this,
+                                    ejectGroupMemberRequest.GroupData.GroupID,
+                                    e.EjecteeID);
+                        }
+                    }
+                    break;
+
+                case PacketType.InviteGroupRequest:
+                    InviteGroupRequestPacket inviteGroupRequest =
+                        (InviteGroupRequestPacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (inviteGroupRequest.AgentData.SessionID != SessionId ||
+                            inviteGroupRequest.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    if (m_GroupsModule != null)
+                    {
+                        foreach (InviteGroupRequestPacket.InviteDataBlock b in
+                                inviteGroupRequest.InviteData)
+                        {
+                            m_GroupsModule.InviteGroupRequest(this,
+                                    inviteGroupRequest.GroupData.GroupID,
+                                    b.InviteeID,
+                                    b.RoleID);
+                        }
+                    }
+                    break;
+
+                #endregion
+                case PacketType.StartLure:
+                    StartLurePacket startLureRequest = (StartLurePacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (startLureRequest.AgentData.SessionID != SessionId ||
+                            startLureRequest.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    StartLure handlerStartLure = OnStartLure;
+                    if (handlerStartLure != null)
+                        handlerStartLure(startLureRequest.Info.LureType,
+                                         Utils.BytesToString(
+                                            startLureRequest.Info.Message),
+                                         startLureRequest.TargetData[0].TargetID,
+                                         this);
+                    break;
+
+                case PacketType.TeleportLureRequest:
+                    TeleportLureRequestPacket teleportLureRequest =
+                            (TeleportLureRequestPacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (teleportLureRequest.Info.SessionID != SessionId ||
+                            teleportLureRequest.Info.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    TeleportLureRequest handlerTeleportLureRequest = OnTeleportLureRequest;
+                    if (handlerTeleportLureRequest != null)
+                        handlerTeleportLureRequest(
+                                 teleportLureRequest.Info.LureID,
+                                 teleportLureRequest.Info.TeleportFlags,
+                                 this);
+                    break;
+
+                case PacketType.ClassifiedInfoRequest:
+                    ClassifiedInfoRequestPacket classifiedInfoRequest =
+                            (ClassifiedInfoRequestPacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (classifiedInfoRequest.AgentData.SessionID != SessionId ||
+                            classifiedInfoRequest.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    ClassifiedInfoRequest handlerClassifiedInfoRequest = OnClassifiedInfoRequest;
+                    if (handlerClassifiedInfoRequest != null)
+                        handlerClassifiedInfoRequest(
+                                 classifiedInfoRequest.Data.ClassifiedID,
+                                 this);
+                    break;
+
+                case PacketType.ClassifiedInfoUpdate:
+                    ClassifiedInfoUpdatePacket classifiedInfoUpdate =
+                            (ClassifiedInfoUpdatePacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (classifiedInfoUpdate.AgentData.SessionID != SessionId ||
+                            classifiedInfoUpdate.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    ClassifiedInfoUpdate handlerClassifiedInfoUpdate = OnClassifiedInfoUpdate;
+                    if (handlerClassifiedInfoUpdate != null)
+                        handlerClassifiedInfoUpdate(
+                                classifiedInfoUpdate.Data.ClassifiedID,
+                                classifiedInfoUpdate.Data.Category,
+                                Utils.BytesToString(
+                                        classifiedInfoUpdate.Data.Name),
+                                Utils.BytesToString(
+                                        classifiedInfoUpdate.Data.Desc),
+                                classifiedInfoUpdate.Data.ParcelID,
+                                classifiedInfoUpdate.Data.ParentEstate,
+                                classifiedInfoUpdate.Data.SnapshotID,
+                                new Vector3(
+                                    classifiedInfoUpdate.Data.PosGlobal),
+                                classifiedInfoUpdate.Data.ClassifiedFlags,
+                                classifiedInfoUpdate.Data.PriceForListing,
+                                this);
+                    break;
+
+                case PacketType.ClassifiedDelete:
+                    ClassifiedDeletePacket classifiedDelete =
+                            (ClassifiedDeletePacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (classifiedDelete.AgentData.SessionID != SessionId ||
+                            classifiedDelete.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    ClassifiedDelete handlerClassifiedDelete = OnClassifiedDelete;
+                    if (handlerClassifiedDelete != null)
+                        handlerClassifiedDelete(
+                                 classifiedDelete.Data.ClassifiedID,
+                                 this);
+                    break;
+
+                case PacketType.ClassifiedGodDelete:
+                    ClassifiedGodDeletePacket classifiedGodDelete =
+                            (ClassifiedGodDeletePacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (classifiedGodDelete.AgentData.SessionID != SessionId ||
+                            classifiedGodDelete.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    ClassifiedDelete handlerClassifiedGodDelete = OnClassifiedGodDelete;
+                    if (handlerClassifiedGodDelete != null)
+                        handlerClassifiedGodDelete(
+                                 classifiedGodDelete.Data.ClassifiedID,
+                                 this);
+                    break;
+
+                case PacketType.EventGodDelete:
+                    EventGodDeletePacket eventGodDelete =
+                            (EventGodDeletePacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (eventGodDelete.AgentData.SessionID != SessionId ||
+                            eventGodDelete.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    EventGodDelete handlerEventGodDelete = OnEventGodDelete;
+                    if (handlerEventGodDelete != null)
+                        handlerEventGodDelete(
+                                eventGodDelete.EventData.EventID,
+                                eventGodDelete.QueryData.QueryID,
+                                Utils.BytesToString(
+                                        eventGodDelete.QueryData.QueryText),
+                                eventGodDelete.QueryData.QueryFlags,
+                                eventGodDelete.QueryData.QueryStart,
+                                this);
+                    break;
+
+                case PacketType.EventNotificationAddRequest:
+                    EventNotificationAddRequestPacket eventNotificationAdd =
+                            (EventNotificationAddRequestPacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (eventNotificationAdd.AgentData.SessionID != SessionId ||
+                            eventNotificationAdd.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    EventNotificationAddRequest handlerEventNotificationAddRequest = OnEventNotificationAddRequest;
+                    if (handlerEventNotificationAddRequest != null)
+                        handlerEventNotificationAddRequest(
+                                eventNotificationAdd.EventData.EventID, this);
+                    break;
+
+                case PacketType.EventNotificationRemoveRequest:
+                    EventNotificationRemoveRequestPacket eventNotificationRemove =
+                            (EventNotificationRemoveRequestPacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (eventNotificationRemove.AgentData.SessionID != SessionId ||
+                            eventNotificationRemove.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    EventNotificationRemoveRequest handlerEventNotificationRemoveRequest = OnEventNotificationRemoveRequest;
+                    if (handlerEventNotificationRemoveRequest != null)
+                        handlerEventNotificationRemoveRequest(
+                                eventNotificationRemove.EventData.EventID, this);
+                    break;
+
+                case PacketType.RetrieveInstantMessages:
+                    RetrieveInstantMessagesPacket rimpInstantMessagePack = (RetrieveInstantMessagesPacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (rimpInstantMessagePack.AgentData.SessionID != SessionId ||
+                            rimpInstantMessagePack.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    RetrieveInstantMessages handlerRetrieveInstantMessages = OnRetrieveInstantMessages;
+                    if (handlerRetrieveInstantMessages != null)
+                        handlerRetrieveInstantMessages(this);
+                    break;
+
+                case PacketType.PickDelete:
+                    PickDeletePacket pickDelete =
+                            (PickDeletePacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (pickDelete.AgentData.SessionID != SessionId ||
+                            pickDelete.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    PickDelete handlerPickDelete = OnPickDelete;
+                    if (handlerPickDelete != null)
+                        handlerPickDelete(this, pickDelete.Data.PickID);
+                    break;
+                case PacketType.PickGodDelete:
+                    PickGodDeletePacket pickGodDelete =
+                            (PickGodDeletePacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (pickGodDelete.AgentData.SessionID != SessionId ||
+                            pickGodDelete.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    PickGodDelete handlerPickGodDelete = OnPickGodDelete;
+                    if (handlerPickGodDelete != null)
+                        handlerPickGodDelete(this,
+                                pickGodDelete.AgentData.AgentID,
+                                pickGodDelete.Data.PickID,
+                                pickGodDelete.Data.QueryID);
+                    break;
+                case PacketType.PickInfoUpdate:
+                    PickInfoUpdatePacket pickInfoUpdate =
+                            (PickInfoUpdatePacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (pickInfoUpdate.AgentData.SessionID != SessionId ||
+                            pickInfoUpdate.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    PickInfoUpdate handlerPickInfoUpdate = OnPickInfoUpdate;
+                    if (handlerPickInfoUpdate != null)
+                        handlerPickInfoUpdate(this,
+                                pickInfoUpdate.Data.PickID,
+                                pickInfoUpdate.Data.CreatorID,
+                                pickInfoUpdate.Data.TopPick,
+                                Utils.BytesToString(pickInfoUpdate.Data.Name),
+                                Utils.BytesToString(pickInfoUpdate.Data.Desc),
+                                pickInfoUpdate.Data.SnapshotID,
+                                pickInfoUpdate.Data.SortOrder,
+                                pickInfoUpdate.Data.Enabled);
+                    break;
+                case PacketType.AvatarNotesUpdate:
+                    AvatarNotesUpdatePacket avatarNotesUpdate =
+                            (AvatarNotesUpdatePacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (avatarNotesUpdate.AgentData.SessionID != SessionId ||
+                            avatarNotesUpdate.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    AvatarNotesUpdate handlerAvatarNotesUpdate = OnAvatarNotesUpdate;
+                    if (handlerAvatarNotesUpdate != null)
+                        handlerAvatarNotesUpdate(this,
+                                avatarNotesUpdate.Data.TargetID,
+                                Utils.BytesToString(avatarNotesUpdate.Data.Notes));
+                    break;
+
+                case PacketType.AvatarInterestsUpdate:
+                    AvatarInterestsUpdatePacket avatarInterestUpdate =
+                            (AvatarInterestsUpdatePacket)Pack;
+
+                    #region Packet Session and User Check
+                    if (m_checkPackets)
+                    {
+                        if (avatarInterestUpdate.AgentData.SessionID != SessionId ||
+                            avatarInterestUpdate.AgentData.AgentID != AgentId)
+                            break;
+                    }
+                    #endregion
+
+                    AvatarInterestUpdate handlerAvatarInterestUpdate = OnAvatarInterestUpdate;
+                    if (handlerAvatarInterestUpdate != null)
+                        handlerAvatarInterestUpdate(this,
+                            avatarInterestUpdate.PropertiesData.WantToMask,
+                            Utils.BytesToString(avatarInterestUpdate.PropertiesData.WantToText),
+                            avatarInterestUpdate.PropertiesData.SkillsMask,
+                            Utils.BytesToString(avatarInterestUpdate.PropertiesData.SkillsText),
+                            Utils.BytesToString(avatarInterestUpdate.PropertiesData.LanguagesText));
+                    break;
+
+                case PacketType.PlacesQuery:
+                    PlacesQueryPacket placesQueryPacket =
+                            (PlacesQueryPacket)Pack;
+
+                    PlacesQuery handlerPlacesQuery = OnPlacesQuery;
+
+                    if (handlerPlacesQuery != null)
+                        handlerPlacesQuery(placesQueryPacket.AgentData.QueryID,
+                                placesQueryPacket.TransactionData.TransactionID,
+                                Utils.BytesToString(
+                                        placesQueryPacket.QueryData.QueryText),
+                                placesQueryPacket.QueryData.QueryFlags,
+                                (byte)placesQueryPacket.QueryData.Category,
+                                Utils.BytesToString(
+                                        placesQueryPacket.QueryData.SimName),
+                                this);
+                    break;
+                default:
+                    m_log.Warn("[CLIENT]: unhandled packet " + Pack);
+                    break;
+
+                #endregion
+            }
+
+            PacketPool.Instance.ReturnPacket(Pack);
+
+        }
+
+        private static PrimitiveBaseShape GetShapeFromAddPacket(ObjectAddPacket addPacket)
+        {
+            PrimitiveBaseShape shape = new PrimitiveBaseShape();
+
+            shape.PCode = addPacket.ObjectData.PCode;
+            shape.State = addPacket.ObjectData.State;
+            shape.PathBegin = addPacket.ObjectData.PathBegin;
+            shape.PathEnd = addPacket.ObjectData.PathEnd;
+            shape.PathScaleX = addPacket.ObjectData.PathScaleX;
+            shape.PathScaleY = addPacket.ObjectData.PathScaleY;
+            shape.PathShearX = addPacket.ObjectData.PathShearX;
+            shape.PathShearY = addPacket.ObjectData.PathShearY;
+            shape.PathSkew = addPacket.ObjectData.PathSkew;
+            shape.ProfileBegin = addPacket.ObjectData.ProfileBegin;
+            shape.ProfileEnd = addPacket.ObjectData.ProfileEnd;
+            shape.Scale = addPacket.ObjectData.Scale;
+            shape.PathCurve = addPacket.ObjectData.PathCurve;
+            shape.ProfileCurve = addPacket.ObjectData.ProfileCurve;
+            shape.ProfileHollow = addPacket.ObjectData.ProfileHollow;
+            shape.PathRadiusOffset = addPacket.ObjectData.PathRadiusOffset;
+            shape.PathRevolutions = addPacket.ObjectData.PathRevolutions;
+            shape.PathTaperX = addPacket.ObjectData.PathTaperX;
+            shape.PathTaperY = addPacket.ObjectData.PathTaperY;
+            shape.PathTwist = addPacket.ObjectData.PathTwist;
+            shape.PathTwistBegin = addPacket.ObjectData.PathTwistBegin;
+            Primitive.TextureEntry ntex = new Primitive.TextureEntry(new UUID("89556747-24cb-43ed-920b-47caed15465f"));
+            shape.TextureEntry = ntex.GetBytes();
+            //shape.Textures = ntex;
+            return shape;
+        }
+
+        public ClientInfo GetClientInfo()
+        {
+            ClientInfo info = m_udpClient.GetClientInfo();
+
+            info.userEP = m_userEndPoint;
+            info.proxyEP = null;
+            info.agentcircuit = new sAgentCircuitData(RequestClientInfo());
+
+            return info;
+        }
+
+        public void SetClientInfo(ClientInfo info)
+        {
+            m_udpClient.SetClientInfo(info);
+        }
+
+        public EndPoint GetClientEP()
+        {
+            return m_userEndPoint;
+        }
+
+        #region Media Parcel Members
+
+        public void SendParcelMediaCommand(uint flags, ParcelMediaCommandEnum command, float time)
+        {
+            ParcelMediaCommandMessagePacket commandMessagePacket = new ParcelMediaCommandMessagePacket();
+            commandMessagePacket.CommandBlock.Flags = flags;
+            commandMessagePacket.CommandBlock.Command = (uint)command;
+            commandMessagePacket.CommandBlock.Time = time;
+
+            OutPacket(commandMessagePacket, ThrottleOutPacketType.Unknown);
+        }
+
+        public void SendParcelMediaUpdate(string mediaUrl, UUID mediaTextureID,
+                                   byte autoScale, string mediaType, string mediaDesc, int mediaWidth, int mediaHeight,
+                                   byte mediaLoop)
+        {
+            ParcelMediaUpdatePacket updatePacket = new ParcelMediaUpdatePacket();
+            updatePacket.DataBlock.MediaURL = Util.StringToBytes256(mediaUrl);
+            updatePacket.DataBlock.MediaID = mediaTextureID;
+            updatePacket.DataBlock.MediaAutoScale = autoScale;
+
+            updatePacket.DataBlockExtended.MediaType = Util.StringToBytes256(mediaType);
+            updatePacket.DataBlockExtended.MediaDesc = Util.StringToBytes256(mediaDesc);
+            updatePacket.DataBlockExtended.MediaWidth = mediaWidth;
+            updatePacket.DataBlockExtended.MediaHeight = mediaHeight;
+            updatePacket.DataBlockExtended.MediaLoop = mediaLoop;
+
+            OutPacket(updatePacket, ThrottleOutPacketType.Unknown);
+        }
+
+        #endregion
+
+        #region Camera
+
+        public void SendSetFollowCamProperties(UUID objectID, SortedDictionary<int, float> parameters)
+        {
+            SetFollowCamPropertiesPacket packet = (SetFollowCamPropertiesPacket)PacketPool.Instance.GetPacket(PacketType.SetFollowCamProperties);
+            packet.ObjectData.ObjectID = objectID;
+            SetFollowCamPropertiesPacket.CameraPropertyBlock[] camPropBlock = new SetFollowCamPropertiesPacket.CameraPropertyBlock[parameters.Count];
+            uint idx = 0;
+            foreach (KeyValuePair<int, float> pair in parameters)
+            {
+                SetFollowCamPropertiesPacket.CameraPropertyBlock block = new SetFollowCamPropertiesPacket.CameraPropertyBlock();
+                block.Type = pair.Key;
+                block.Value = pair.Value;
+
+                camPropBlock[idx++] = block;
+            }
+            packet.CameraProperty = camPropBlock;
+            OutPacket(packet, ThrottleOutPacketType.Task);
+        }
+
+        public void SendClearFollowCamProperties(UUID objectID)
+        {
+            ClearFollowCamPropertiesPacket packet = (ClearFollowCamPropertiesPacket)PacketPool.Instance.GetPacket(PacketType.ClearFollowCamProperties);
+            packet.ObjectData.ObjectID = objectID;
+            OutPacket(packet, ThrottleOutPacketType.Task);
+        }
+
+        #endregion
+
+        public void SetClientOption(string option, string value)
+        {
+            switch (option)
+            {
+                default:
+                    break;
+            }
+        }
+
+        public string GetClientOption(string option)
+        {
+            switch (option)
+            {
+                default:
+                    break;
+            }
+            return string.Empty;
+        }
+
+        public void KillEndDone()
+        {
+        }
+
+        #region IClientCore
+
+        private readonly Dictionary<Type, object> m_clientInterfaces = new Dictionary<Type, object>();
+
+        /// <summary>
+        /// Register an interface on this client, should only be called in the constructor.
+        /// </summary>
+        /// <typeparam name="T"></typeparam>
+        /// <param name="iface"></param>
+        protected void RegisterInterface<T>(T iface)
+        {
+            lock (m_clientInterfaces)
+            {
+                if (!m_clientInterfaces.ContainsKey(typeof(T)))
+                {
+                    m_clientInterfaces.Add(typeof(T), iface);
+                }
+            }
+        }
+
+        public bool TryGet<T>(out T iface)
+        {
+            if (m_clientInterfaces.ContainsKey(typeof(T)))
+            {
+                iface = (T)m_clientInterfaces[typeof(T)];
+                return true;
+            }
+            iface = default(T);
+            return false;
+        }
+
+        public T Get<T>()
+        {
+            return (T)m_clientInterfaces[typeof(T)];
+        }
+
+        public void Disconnect(string reason)
+        {
+            Kick(reason);
+            Thread.Sleep(1000);
+            Close();
+        }
+
+        public void Disconnect()
+        {
+            Close();
+        }
+
+        #endregion
+
+        public void RefreshGroupMembership()
+        {
+            if (m_GroupsModule != null)
+            {
+                GroupMembershipData[] GroupMembership =
+                        m_GroupsModule.GetMembershipData(AgentId);
+
+                m_groupPowers.Clear();
+
+                for (int i = 0; i < GroupMembership.Length; i++)
+                {
+                    m_groupPowers[GroupMembership[i].GroupID] = GroupMembership[i].GroupPowers;
+                }
+            }
+        }
+
+        public string Report()
+        {
+            return m_udpClient.GetStats();
+        }
+
+        public string XReport(string uptime, string version)
+        {
+            return String.Empty;
+        }
+
+        public void MakeAssetRequest(TransferRequestPacket transferRequest, UUID taskID)
         {
             UUID requestID = UUID.Zero;
             if (transferRequest.TransferInfo.SourceType == 2)
@@ -10907,12 +10091,20 @@ namespace OpenSim.Region.ClientStack.LindenUDP
             {
                 //inventory asset request
                 requestID = new UUID(transferRequest.TransferInfo.Params, 80);
-                //m_log.Debug("asset request " + requestID);
+                //m_log.Debug("[XXX] inventory asset request " + requestID);
+                //if (taskID == UUID.Zero) // Agent
+                //    if (m_scene is HGScene)
+                //    {
+                //        m_log.Debug("[XXX] hg asset request " + requestID);
+                //        // We may need to fetch the asset from the user's asset server into the local asset server
+                //        HGAssetMapper mapper = ((HGScene)m_scene).AssetMapper;
+                //        mapper.Get(requestID, AgentId);
+                //    }
             }
 
             //check to see if asset is in local cache, if not we need to request it from asset server.
             //m_log.Debug("asset request " + requestID);
-            
+
             m_assetService.Get(requestID.ToString(), transferRequest, AssetReceived);
 
         }
@@ -10923,12 +10115,12 @@ namespace OpenSim.Region.ClientStack.LindenUDP
 
             UUID requestID = UUID.Zero;
             byte source = 2;
-            if (transferRequest.TransferInfo.SourceType == 2)
+            if ((transferRequest.TransferInfo.SourceType == 2) || (transferRequest.TransferInfo.SourceType == 2222))
             {
                 //direct asset request
                 requestID = new UUID(transferRequest.TransferInfo.Params, 0);
             }
-            else if (transferRequest.TransferInfo.SourceType == 3)
+            else if ((transferRequest.TransferInfo.SourceType == 3) || (transferRequest.TransferInfo.SourceType == 3333))
             {
                 //inventory asset request
                 requestID = new UUID(transferRequest.TransferInfo.Params, 80);
@@ -10936,10 +10128,28 @@ namespace OpenSim.Region.ClientStack.LindenUDP
                 //m_log.Debug("asset request " + requestID);
             }
 
-            // FIXME: We never tell the client about assets which do not exist when requested by this transfer mechanism, which can't be right.
             if (null == asset)
             {
+                if ((m_hyperAssets != null) && (transferRequest.TransferInfo.SourceType < 2000))
+                {
+                    // Try the user's inventory, but only if it's different from the regions'
+                    string userAssets = m_hyperAssets.GetUserAssetServer(AgentId);
+                    if ((userAssets != string.Empty) && (userAssets != m_hyperAssets.GetSimAssetServer()))
+                    {
+                        m_log.DebugFormat("[CLIENT]: asset {0} not found in local asset storage. Trying user's storage.", id);
+                        if (transferRequest.TransferInfo.SourceType == 2)
+                            transferRequest.TransferInfo.SourceType = 2222; // marker
+                        else if (transferRequest.TransferInfo.SourceType == 3)
+                            transferRequest.TransferInfo.SourceType = 3333; // marker
+
+                        m_assetService.Get(userAssets + "/" + id, transferRequest, AssetReceived);
+                        return;
+                    }
+                }
+
                 //m_log.DebugFormat("[ASSET CACHE]: Asset transfer request for asset which is {0} already known to be missing.  Dropping", requestID);
+
+                // FIXME: We never tell the client about assets which do not exist when requested by this transfer mechanism, which can't be right.
                 return;
             }
 
@@ -10981,7 +10191,6 @@ namespace OpenSim.Region.ClientStack.LindenUDP
             return numPackets;
         }
 
-
         #region IClientIPEndpoint Members
 
         public IPAddress EndPoint
@@ -11009,5 +10218,167 @@ namespace OpenSim.Region.ClientStack.LindenUDP
             pack.TextureData.TextureID = textureID;
             OutPacket(pack, ThrottleOutPacketType.Task);
         }
+
+        #region PriorityQueue
+        private class PriorityQueue<TPriority, TValue>
+        {
+            internal delegate bool UpdatePriorityHandler(ref TPriority priority, uint local_id);
+
+            private MinHeap<MinHeapItem>[] m_heaps = new MinHeap<MinHeapItem>[1];
+            private Dictionary<uint, LookupItem> m_lookupTable;
+            private Comparison<TPriority> m_comparison;
+            private object m_syncRoot = new object();
+
+            internal PriorityQueue() :
+                this(MinHeap<MinHeapItem>.DEFAULT_CAPACITY, Comparer<TPriority>.Default) { }
+            internal PriorityQueue(int capacity) :
+                this(capacity, Comparer<TPriority>.Default) { }
+            internal PriorityQueue(IComparer<TPriority> comparer) :
+                this(new Comparison<TPriority>(comparer.Compare)) { }
+            internal PriorityQueue(Comparison<TPriority> comparison) :
+                this(MinHeap<MinHeapItem>.DEFAULT_CAPACITY, comparison) { }
+            internal PriorityQueue(int capacity, IComparer<TPriority> comparer) :
+                this(capacity, new Comparison<TPriority>(comparer.Compare)) { }
+            internal PriorityQueue(int capacity, Comparison<TPriority> comparison)
+            {
+                m_lookupTable = new Dictionary<uint, LookupItem>(capacity);
+
+                for (int i = 0; i < m_heaps.Length; ++i)
+                    m_heaps[i] = new MinHeap<MinHeapItem>(capacity);
+                this.m_comparison = comparison;
+            }
+
+            internal object SyncRoot { get { return this.m_syncRoot; } }
+            internal int Count
+            {
+                get
+                {
+                    int count = 0;
+                    for (int i = 0; i < m_heaps.Length; ++i)
+                        count = m_heaps[i].Count;
+                    return count;
+                }
+            }
+
+            internal bool Enqueue(TPriority priority, TValue value, uint local_id)
+            {
+                LookupItem item;
+
+                if (m_lookupTable.TryGetValue(local_id, out item))
+                {
+                    item.Heap[item.Handle] = new MinHeapItem(priority, value, local_id, this.m_comparison);
+                    return false;
+                }
+                else
+                {
+                    item.Heap = m_heaps[0];
+                    item.Heap.Add(new MinHeapItem(priority, value, local_id, this.m_comparison), ref item.Handle);
+                    m_lookupTable.Add(local_id, item);
+                    return true;
+                }
+            }
+
+            internal TValue Peek()
+            {
+                for (int i = 0; i < m_heaps.Length; ++i)
+                    if (m_heaps[i].Count > 0)
+                        return m_heaps[i].Min().Value;
+                throw new InvalidOperationException(string.Format("The {0} is empty", this.GetType().ToString()));
+            }
+
+            internal TValue Dequeue()
+            {
+                for (int i = 0; i < m_heaps.Length; ++i)
+                {
+                    if (m_heaps[i].Count > 0)
+                    {
+                        MinHeapItem item = m_heaps[i].RemoveMin();
+                        m_lookupTable.Remove(item.LocalID);
+                        return item.Value;
+                    }
+                }
+                throw new InvalidOperationException(string.Format("The {0} is empty", this.GetType().ToString()));
+            }
+
+            internal void Reprioritize(UpdatePriorityHandler handler)
+            {
+                MinHeapItem item;
+                TPriority priority;
+
+                foreach (LookupItem lookup in new List<LookupItem>(this.m_lookupTable.Values))
+                {
+                    if (lookup.Heap.TryGetValue(lookup.Handle, out item))
+                    {
+                        priority = item.Priority;
+                        if (handler(ref priority, item.LocalID))
+                        {
+                            if (lookup.Heap.ContainsHandle(lookup.Handle))
+                                lookup.Heap[lookup.Handle] =
+                                    new MinHeapItem(priority, item.Value, item.LocalID, this.m_comparison);
+                        }
+                        else
+                        {
+                            m_log.Warn("[LLCLIENTVIEW]: UpdatePriorityHandler returned false, dropping update");
+                            lookup.Heap.Remove(lookup.Handle);
+                            this.m_lookupTable.Remove(item.LocalID);
+                        }
+                    }
+                }
+            }
+
+            #region MinHeapItem
+            private struct MinHeapItem : IComparable<MinHeapItem>
+            {
+                private TPriority priority;
+                private TValue value;
+                private uint local_id;
+                private Comparison<TPriority> comparison;
+
+                internal MinHeapItem(TPriority priority, TValue value, uint local_id) :
+                    this(priority, value, local_id, Comparer<TPriority>.Default) { }
+                internal MinHeapItem(TPriority priority, TValue value, uint local_id, IComparer<TPriority> comparer) :
+                    this(priority, value, local_id, new Comparison<TPriority>(comparer.Compare)) { }
+                internal MinHeapItem(TPriority priority, TValue value, uint local_id, Comparison<TPriority> comparison)
+                {
+                    this.priority = priority;
+                    this.value = value;
+                    this.local_id = local_id;
+                    this.comparison = comparison;
+                }
+
+                internal TPriority Priority { get { return this.priority; } }
+                internal TValue Value { get { return this.value; } }
+                internal uint LocalID { get { return this.local_id; } }
+
+                public override string ToString()
+                {
+                    StringBuilder sb = new StringBuilder();
+                    sb.Append("[");
+                    if (this.priority != null)
+                        sb.Append(this.priority.ToString());
+                    sb.Append(",");
+                    if (this.value != null)
+                        sb.Append(this.value.ToString());
+                    sb.Append("]");
+                    return sb.ToString();
+                }
+
+                public int CompareTo(MinHeapItem other)
+                {
+                    return this.comparison(this.priority, other.priority);
+                }
+            }
+            #endregion
+
+            #region LookupItem
+            private struct LookupItem
+            {
+                internal MinHeap<MinHeapItem> Heap;
+                internal IHandle Handle;
+            }
+            #endregion
+        }
+        #endregion
+
     }
 }

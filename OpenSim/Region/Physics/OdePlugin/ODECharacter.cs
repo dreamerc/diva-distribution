@@ -98,6 +98,7 @@ namespace OpenSim.Region.Physics.OdePlugin
         private bool m_alwaysRun = false;
         private bool m_hackSentFall = false;
         private bool m_hackSentFly = false;
+        private int m_requestedUpdateFrequency = 0;
         private PhysicsVector m_taintPosition = new PhysicsVector(0, 0, 0);
         public uint m_localID = 0;
         public bool m_returnCollisions = false;
@@ -138,8 +139,14 @@ namespace OpenSim.Region.Physics.OdePlugin
         public int m_eventsubscription = 0;
         private CollisionEventUpdate CollisionEventsThisFrame = new CollisionEventUpdate();
 
+        // unique UUID of this character object
+        public UUID m_uuid;
+        public bool bad = false;
+
         public OdeCharacter(String avName, OdeScene parent_scene, PhysicsVector pos, CollisionLocker dode, PhysicsVector size, float pid_d, float pid_p, float capsule_radius, float tensor, float density, float height_fudge_factor, float walk_divisor, float rundivisor)
         {
+            m_uuid = UUID.Random();
+
             // ode = dode;
             _velocity = new PhysicsVector();
             _target_velocity = new PhysicsVector();
@@ -222,11 +229,6 @@ namespace OpenSim.Region.Physics.OdePlugin
         public override uint LocalID
         {
             set { m_localID = value; }
-        }
-
-        public override int GetHashCode()
-        {
-            return (int)m_localID;
         }
 
         public override bool Grabbed
@@ -1104,7 +1106,20 @@ namespace OpenSim.Region.Physics.OdePlugin
         public void UpdatePositionAndVelocity()
         {
             //  no lock; called from Simulate() -- if you call this from elsewhere, gotta lock or do Monitor.Enter/Exit!
-            d.Vector3 vec = d.BodyGetPosition(Body);
+            d.Vector3 vec;
+            try
+            {
+                vec = d.BodyGetPosition(Body);
+            }
+            catch (NullReferenceException)
+            {
+                bad = true;
+                _parent_scene.BadCharacter(this);
+                vec = new d.Vector3(_position.X, _position.Y, _position.Z);
+                base.RaiseOutOfBounds(_position); // Tells ScenePresence that there's a problem!
+                m_log.WarnFormat("[ODEPLUGIN]: Avatar Null reference for Avatar {0}, physical actor {1}", m_name, m_uuid);
+            }
+            
 
             //  kluge to keep things in bounds.  ODE lets dead avatars drift away (they should be removed!)
             if (vec.X < 0.0f) vec.X = 0.0f;
@@ -1136,7 +1151,16 @@ namespace OpenSim.Region.Physics.OdePlugin
             else
             {
                 m_lastUpdateSent = false;
-                vec = d.BodyGetLinearVel(Body);
+                try
+                {
+                    vec = d.BodyGetLinearVel(Body);
+                }
+                catch (NullReferenceException)
+                {
+                    vec.X = _velocity.X;
+                    vec.Y = _velocity.Y;
+                    vec.Z = _velocity.Z;
+                }
                 _velocity.X = (vec.X);
                 _velocity.Y = (vec.Y);
 
@@ -1184,26 +1208,31 @@ namespace OpenSim.Region.Physics.OdePlugin
 
         public override void SubscribeEvents(int ms)
         {
+            m_requestedUpdateFrequency = ms;
             m_eventsubscription = ms;
             _parent_scene.addCollisionEventReporting(this);
         }
         public override void UnSubscribeEvents()
         {
             _parent_scene.remCollisionEventReporting(this);
+            m_requestedUpdateFrequency = 0;
             m_eventsubscription = 0;
         }
         public void AddCollisionEvent(uint CollidedWith, float depth)
         {
             if (m_eventsubscription > 0)
-                CollisionEventsThisFrame.addCollider(CollidedWith,depth);
+            {
+                CollisionEventsThisFrame.addCollider(CollidedWith, depth);
+            }
         }
 
         public void SendCollisions()
         {
-            if (m_eventsubscription > 0)
+            if (m_eventsubscription > m_requestedUpdateFrequency)
             {
                 base.SendCollisionUpdate(CollisionEventsThisFrame);
                 CollisionEventsThisFrame = new CollisionEventUpdate();
+                m_eventsubscription = 0;
             }
         }
         public override bool SubscribedEvents()
@@ -1308,6 +1337,14 @@ namespace OpenSim.Region.Physics.OdePlugin
                 }
             }
 
+        }
+
+        internal void AddCollisionFrameTime(int p)
+        {
+            // protect it from overflow crashing
+            if (m_eventsubscription + p >= int.MaxValue)
+                m_eventsubscription = 0;
+            m_eventsubscription += p;
         }
     }
 }

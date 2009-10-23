@@ -29,21 +29,38 @@ using System;
 
 namespace OpenSim.Framework
 {
-    [Flags]
     public enum ThrottleOutPacketType : int
     {
+        /// <summary>Unthrottled packets</summary>
+        Unknown = -1,
+        /// <summary>Packets that are being resent</summary>
         Resend = 0,
+        /// <summary>Terrain data</summary>
         Land = 1,
+        /// <summary>Wind data</summary>
         Wind = 2,
+        /// <summary>Cloud data</summary>
         Cloud = 3,
+        /// <summary>Any packets that do not fit into the other throttles</summary>
         Task = 4,
+        /// <summary>Texture assets</summary>
         Texture = 5,
+        /// <summary>Non-texture assets</summary>
         Asset = 6,
-        Unknown = 7, // Also doubles as 'do not throttle'
-        Back = 8,
+        /// <summary>Avatar and primitive data</summary>
+        /// <remarks>This is a sub-category of Task</remarks>
+        State = 7,
+    }
 
-        TypeMask = 15, // The mask to mask off the flags
-
-        LowPriority = 128 // Additional flags
+    [Flags]
+    public enum ThrottleOutPacketTypeFlags
+    {
+        Land = 1 << 0,
+        Wind = 1 << 1,
+        Cloud = 1 << 2,
+        Task = 1 << 3,
+        Texture = 1 << 4,
+        Asset = 1 << 5,
+        State = 1 << 6,
     }
 }

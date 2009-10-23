@@ -44,7 +44,6 @@ namespace OpenSim.Data.MySQL
         private static readonly ILog m_log = LogManager.GetLogger(MethodBase.GetCurrentMethod().DeclaringType);
 
         private MySQLManager _dbConnection;
-        private long TicksToEpoch;
 
         #region IPlugin Members
 
@@ -61,8 +60,6 @@ namespace OpenSim.Data.MySQL
         /// <param name="connect">connect string</param>
         override public void Initialise(string connect)
         {
-            TicksToEpoch = new DateTime(1970,1,1).Ticks;
-
             // TODO: This will let you pass in the connect string in
             // the config, though someone will need to write that.
             if (connect == String.Empty)
@@ -223,7 +220,7 @@ namespace OpenSim.Data.MySQL
                     using (cmd)
                     {
                         // create unix epoch time
-                        int now = (int)((DateTime.Now.Ticks - TicksToEpoch) / 10000000);
+                        int now = (int)Utils.DateTimeToUnixTime(DateTime.UtcNow);
                         cmd.Parameters.AddWithValue("?id", asset.ID);
                         cmd.Parameters.AddWithValue("?name", assetName);
                         cmd.Parameters.AddWithValue("?description", assetDescription);
@@ -239,10 +236,8 @@ namespace OpenSim.Data.MySQL
                 }
                 catch (Exception e)
                 {
-                    m_log.ErrorFormat(
-                        "[ASSETS DB]: " +
-                        "MySql failure creating asset {0} with name {1}" + Environment.NewLine + e.ToString()
-                        + Environment.NewLine + "Attempting reconnection", asset.FullID, asset.Name);
+                    m_log.ErrorFormat("[ASSET DB]: MySQL failure creating asset {0} with name \"{1}\". Attempting reconnect. Error: {2}",
+                        asset.FullID, asset.Name, e.Message);
                     _dbConnection.Reconnect();
                 }
             }
@@ -250,6 +245,9 @@ namespace OpenSim.Data.MySQL
 
         private void UpdateAccessTime(AssetBase asset)
         {
+            // Writing to the database every time Get() is called on an asset is killing us. Seriously. -jph
+            return;
+
             lock (_dbConnection)
             {
                 _dbConnection.CheckConnection();
@@ -264,7 +262,7 @@ namespace OpenSim.Data.MySQL
                     using (cmd)
                     {
                         // create unix epoch time
-                        int now = (int)((DateTime.Now.Ticks - TicksToEpoch) / 10000000);
+                        int now = (int)Utils.DateTimeToUnixTime(DateTime.UtcNow);
                         cmd.Parameters.AddWithValue("?id", asset.ID);
                         cmd.Parameters.AddWithValue("?access_time", now);
                         cmd.ExecuteNonQuery();
