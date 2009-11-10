@@ -36,6 +36,7 @@ using System.Timers;
 using System.Xml;
 using Nini.Config;
 using OpenMetaverse;
+using OpenMetaverse.Packets;
 using OpenMetaverse.Imaging;
 using OpenSim.Framework;
 using OpenSim.Services.Interfaces;
@@ -274,6 +275,23 @@ namespace OpenSim.Region.Framework.Scenes
         private int physicsMS2;
         private int physicsMS;
         private int otherMS;
+        private int tempOnRezMS;
+        private int eventMS;
+        private int backupMS;
+        private int terrainMS;
+        private int landMS;
+        private int lastCompletedFrame;
+
+        public int MonitorFrameTime { get { return frameMS; } }
+        public int MonitorPhysicsUpdateTime { get { return physicsMS; } }
+        public int MonitorPhysicsSyncTime { get { return physicsMS2; } }
+        public int MonitorOtherTime { get { return otherMS; } }
+        public int MonitorTempOnRezTime { get { return tempOnRezMS; } }
+        public int MonitorEventTime { get { return eventMS; } } // This may need to be divided into each event?
+        public int MonitorBackupTime { get { return backupMS; } }
+        public int MonitorTerrainTime { get { return terrainMS; } }
+        public int MonitorLandTime { get { return landMS; } }
+        public int MonitorLastFrameTick { get { return lastCompletedFrame; } }
 
         private bool m_physics_enabled = true;
         private bool m_scripts_enabled = true;
@@ -377,6 +395,73 @@ namespace OpenSim.Region.Framework.Scenes
         }
 
         public int objectCapacity = 45000;
+
+        #endregion
+
+        #region BinaryStats
+
+        public class StatLogger
+        {
+            public DateTime StartTime;
+            public string Path;
+            public System.IO.BinaryWriter Log;
+        }
+        static StatLogger m_statLog = null;
+        static TimeSpan m_statLogPeriod = TimeSpan.FromSeconds(300);
+        static string m_statsDir = String.Empty;
+        static Object m_statLockObject = new Object();
+        private void LogSimStats(SimStats stats)
+        {
+            SimStatsPacket pack = new SimStatsPacket();
+            pack.Region = new SimStatsPacket.RegionBlock();
+            pack.Region.RegionX = stats.RegionX;
+            pack.Region.RegionY = stats.RegionY;
+            pack.Region.RegionFlags = stats.RegionFlags;
+            pack.Region.ObjectCapacity = stats.ObjectCapacity;
+            //pack.Region = //stats.RegionBlock;
+            pack.Stat = stats.StatsBlock;
+            pack.Header.Reliable = false;
+
+            // note that we are inside the reporter lock when called
+            DateTime now = DateTime.Now;
+
+            // hide some time information into the packet
+            pack.Header.Sequence = (uint)now.Ticks;
+
+            lock (m_statLockObject) // m_statLog is shared so make sure there is only executer here
+            {
+                try
+                {
+                    if (m_statLog == null || now > m_statLog.StartTime + m_statLogPeriod)
+                    {
+                        // First log file or time has expired, start writing to a new log file
+                        if (m_statLog != null && m_statLog.Log != null)
+                        {
+                            m_statLog.Log.Close();
+                        }
+                        m_statLog = new StatLogger();
+                        m_statLog.StartTime = now;
+                        m_statLog.Path = (m_statsDir.Length > 0 ? m_statsDir + System.IO.Path.DirectorySeparatorChar.ToString() : "")
+                                + String.Format("stats-{0}.log", now.ToString("yyyyMMddHHmmss"));
+                        m_statLog.Log = new BinaryWriter(File.Open(m_statLog.Path, FileMode.Append, FileAccess.Write));
+                    }
+
+                    // Write the serialized data to disk
+                    if (m_statLog != null && m_statLog.Log != null)
+                        m_statLog.Log.Write(pack.ToBytes());
+                }
+                catch (Exception ex)
+                {
+                    m_log.Error("statistics gathering failed: " + ex.Message, ex);
+                    if (m_statLog != null && m_statLog.Log != null)
+                    {
+                        m_statLog.Log.Close();
+                    }
+                    m_statLog = null;
+                }
+            }
+            return;
+        }
 
         #endregion
 
@@ -565,6 +650,38 @@ namespace OpenSim.Region.Framework.Scenes
                 }
 
                 m_log.Info("[SCENE]: Using the " + m_update_prioritization_scheme + " prioritization scheme");
+
+                #region BinaryStats
+
+                try
+                {
+                    IConfig statConfig = m_config.Configs["Statistics.Binary"];
+                    if (statConfig.Contains("enabled") && statConfig.GetBoolean("enabled"))
+                    {
+                        if (statConfig.Contains("collect_region_stats"))
+                        {
+                            if (statConfig.GetBoolean("collect_region_stats"))
+                            {
+                                // if enabled, add us to the event. If not enabled, I won't get called
+                                StatsReporter.OnSendStatsResult += LogSimStats;
+                            }
+                        }
+                        if (statConfig.Contains("region_stats_period_seconds"))
+                        {
+                            m_statLogPeriod = TimeSpan.FromSeconds(statConfig.GetInt("region_stats_period_seconds"));
+                        }
+                        if (statConfig.Contains("stats_dir"))
+                        {
+                            m_statsDir = statConfig.GetString("stats_dir");
+                        }
+                    }
+                }
+                catch
+                {
+                    // if it doesn't work, we don't collect anything
+                }
+
+                #endregion BinaryStats
             }
             catch
             {
@@ -1026,7 +1143,8 @@ namespace OpenSim.Region.Framework.Scenes
                 TimeSpan SinceLastFrame = DateTime.UtcNow - m_lastupdate;
                 physicsFPS = 0f;
 
-                maintc = maintc = frameMS = otherMS = Environment.TickCount;
+                maintc = otherMS = Environment.TickCount;
+                int tmpFrameMS = maintc;
 
                 // Increment the frame counter
                 ++m_frame;
@@ -1046,15 +1164,16 @@ namespace OpenSim.Region.Framework.Scenes
                     if (m_frame % m_update_presences == 0)
                         m_sceneGraph.UpdatePresences();
 
-                    physicsMS2 = Environment.TickCount;
+                    int TempPhysicsMS2 = Environment.TickCount;
                     if ((m_frame % m_update_physics == 0) && m_physics_enabled)
                         m_sceneGraph.UpdatePreparePhysics();
-                    physicsMS2 = Environment.TickCount - physicsMS2;
+                    TempPhysicsMS2 = Environment.TickCount - TempPhysicsMS2;
+                    physicsMS2 = TempPhysicsMS2;
 
                     if (m_frame % m_update_entitymovement == 0)
                         m_sceneGraph.UpdateScenePresenceMovement();
 
-                    physicsMS = Environment.TickCount;
+                    int TempPhysicsMS = Environment.TickCount;
                     if (m_frame % m_update_physics == 0)
                     {
                         if (m_physics_enabled)
@@ -1062,30 +1181,57 @@ namespace OpenSim.Region.Framework.Scenes
                         if (SynchronizeScene != null)
                             SynchronizeScene(this);
                     }
-                    physicsMS = Environment.TickCount - physicsMS;
-                    physicsMS += physicsMS2;
+                    TempPhysicsMS = Environment.TickCount - TempPhysicsMS;
+                    physicsMS = TempPhysicsMS;
 
                     // Delete temp-on-rez stuff
                     if (m_frame % m_update_backup == 0)
+                    {
+                        int tozMS = Environment.TickCount;
                         CleanTempObjects();
+                        tozMS -= Environment.TickCount;
+                        tempOnRezMS = tozMS;
+                    }
 
                     if (RegionStatus != RegionStatus.SlaveScene)
                     {
                         if (m_frame % m_update_events == 0)
+                        {
+                            int evMS = Environment.TickCount;
                             UpdateEvents();
+                            evMS -= Environment.TickCount;
+                            eventMS = evMS;
+                        }
 
                         if (m_frame % m_update_backup == 0)
+                        {
+                            int backMS = Environment.TickCount;
                             UpdateStorageBackup();
+                            backMS -= Environment.TickCount;
+                            backupMS = backMS;
+                        }
 
                         if (m_frame % m_update_terrain == 0)
+                        {
+                            int terMS = Environment.TickCount;
                             UpdateTerrain();
+                            terMS -= Environment.TickCount;
+                            terrainMS = terMS;
+                        }
 
                         if (m_frame % m_update_land == 0)
+                        {
+                            int ldMS = Environment.TickCount;
                             UpdateLand();
+                            ldMS -= Environment.TickCount;
+                            landMS = ldMS;
+                        }
 
                         int tickCount = Environment.TickCount;
                         otherMS = tickCount - otherMS;
-                        frameMS = tickCount - frameMS;
+                        tmpFrameMS -= tickCount;
+                        frameMS = tmpFrameMS;
+                        lastCompletedFrame = tickCount;
 
                         // if (m_frame%m_update_avatars == 0)
                         //   UpdateInWorldTime();
@@ -1097,7 +1243,7 @@ namespace OpenSim.Region.Framework.Scenes
                         StatsReporter.SetObjects(m_sceneGraph.GetTotalObjectsCount());
                         StatsReporter.SetActiveObjects(m_sceneGraph.GetActiveObjectsCount());
                         StatsReporter.addFrameMS(frameMS);
-                        StatsReporter.addPhysicsMS(physicsMS);
+                        StatsReporter.addPhysicsMS(physicsMS + physicsMS2);
                         StatsReporter.addOtherMS(otherMS);
                         StatsReporter.SetActiveScripts(m_sceneGraph.GetActiveScriptsCount());
                         StatsReporter.addScriptLines(m_sceneGraph.GetScriptLPS());
@@ -4589,7 +4735,7 @@ namespace OpenSim.Region.Framework.Scenes
             SceneObjectPart trackedBody = GetSceneObjectPart(joint.TrackedBodyName); // FIXME: causes a sequential lookup
             if (trackedBody == null) return; // the actor may have been deleted but the joint still lingers around a few frames waiting for deletion. during this time, trackedBody is NULL to prevent further motion of the joint proxy.
             jointProxyObject.Velocity = trackedBody.Velocity;
-            jointProxyObject.RotationalVelocity = trackedBody.RotationalVelocity;
+            jointProxyObject.AngularVelocity = trackedBody.AngularVelocity;
             switch (joint.Type)
             {
                 case PhysicsJointType.Ball:
