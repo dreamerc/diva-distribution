@@ -29,7 +29,6 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Reflection;
-using System.Text;
 using System.Threading;
 using NUnit.Framework;
 using NUnit.Framework.SyntaxHelpers;
@@ -122,8 +121,7 @@ namespace OpenSim.Region.CoreModules.Avatar.Inventory.Archiver.Tests
             }
 
             UUID asset1Id = UUID.Parse("00000000-0000-0000-0000-000000000060");
-            AssetBase asset1 = new AssetBase(asset1Id, asset1Id.ToString(), (sbyte)AssetType.Object);
-            asset1.Data = Encoding.ASCII.GetBytes(SceneObjectSerializer.ToXml2Format(object1));
+            AssetBase asset1 = AssetHelpers.CreateAsset(asset1Id, object1);
             scene.AssetService.Store(asset1);
 
             // Create item
@@ -135,7 +133,7 @@ namespace OpenSim.Region.CoreModules.Avatar.Inventory.Archiver.Tests
             InventoryFolderBase objsFolder 
                 = InventoryArchiveUtils.FindFolderByPath(scene.InventoryService, userId, "Objects");
             item1.Folder = objsFolder.ID;
-            scene.AddInventoryItem(userId, item1);           
+            scene.AddInventoryItem(userId, item1);
 
             MemoryStream archiveWriteStream = new MemoryStream();
             archiverModule.OnInventoryArchiveSaved += SaveCompleted;
@@ -261,9 +259,16 @@ namespace OpenSim.Region.CoreModules.Avatar.Inventory.Archiver.Tests
                 = InventoryArchiveUtils.FindItemByPath(scene.InventoryService, userInfo.UserProfile.ID, item1Name);
             
             Assert.That(foundItem1, Is.Not.Null, "Didn't find loaded item 1");
+
+// We have to disable this check since loaded items that did find users via OSPA resolution are now only storing the
+// UUID, not the OSPA itself.
+//            Assert.That(
+//                foundItem1.CreatorId, Is.EqualTo(item1.CreatorId), 
+//                "Loaded item non-uuid creator doesn't match original");
             Assert.That(
-                foundItem1.CreatorId, Is.EqualTo(item1.CreatorId), 
+                foundItem1.CreatorId, Is.EqualTo(userItemCreatorUuid.ToString()), 
                 "Loaded item non-uuid creator doesn't match original");
+            
             Assert.That(
                 foundItem1.CreatorIdAsUuid, Is.EqualTo(userItemCreatorUuid), 
                 "Loaded item uuid creator doesn't match original");
@@ -293,7 +298,7 @@ namespace OpenSim.Region.CoreModules.Avatar.Inventory.Archiver.Tests
         public void TestIarV0_1WithEscapedChars()
         {
             TestHelper.InMethod();
-            log4net.Config.XmlConfigurator.Configure();
+//            log4net.Config.XmlConfigurator.Configure();
 
             string itemName = "You & you are a mean/man/";
             string humanEscapedItemName = @"You & you are a mean\/man\/";
@@ -338,8 +343,7 @@ namespace OpenSim.Region.CoreModules.Avatar.Inventory.Archiver.Tests
             }
 
             UUID asset1Id = UUID.Parse("00000000-0000-0000-0000-000000000060");
-            AssetBase asset1 = new AssetBase(asset1Id, String.Empty, (sbyte)AssetType.Object);
-            asset1.Data = Encoding.ASCII.GetBytes(SceneObjectSerializer.ToXml2Format(object1));
+            AssetBase asset1 = AssetHelpers.CreateAsset(asset1Id, object1);
             scene.AssetService.Store(asset1);
 
             // Create item
@@ -351,7 +355,7 @@ namespace OpenSim.Region.CoreModules.Avatar.Inventory.Archiver.Tests
             InventoryFolderBase objsFolder 
                 = InventoryArchiveUtils.FindFolderByPath(scene.InventoryService, userId, "Objects");
             item1.Folder = objsFolder.ID;
-            scene.AddInventoryItem(userId, item1);           
+            scene.AddInventoryItem(userId, item1);
 
             MemoryStream archiveWriteStream = new MemoryStream();
             archiverModule.OnInventoryArchiveSaved += SaveCompleted;
@@ -359,15 +363,12 @@ namespace OpenSim.Region.CoreModules.Avatar.Inventory.Archiver.Tests
             mre.Reset();
             archiverModule.ArchiveInventory(
                 Guid.NewGuid(), userFirstName, userLastName, "Objects", userPassword, archiveWriteStream);
-            mre.WaitOne(60000, false);           
+            mre.WaitOne(60000, false);
 
             // LOAD ITEM
             MemoryStream archiveReadStream = new MemoryStream(archiveWriteStream.ToArray());
             
             archiverModule.DearchiveInventory(userFirstName, userLastName, "Scripts", userPassword, archiveReadStream);
-
-            CachedUserInfo userInfo 
-                = scene.CommsManager.UserProfileCacheService.GetUserDetails(userFirstName, userLastName);
 
             InventoryItemBase foundItem1
                 = InventoryArchiveUtils.FindItemByPath(
@@ -379,7 +380,7 @@ namespace OpenSim.Region.CoreModules.Avatar.Inventory.Archiver.Tests
 //                "Loaded item non-uuid creator doesn't match that of the loading user");
             Assert.That(
                 foundItem1.Name, Is.EqualTo(itemName), 
-                "Loaded item name doesn't match saved name");            
+                "Loaded item name doesn't match saved name");
         }
 
         /// <summary>

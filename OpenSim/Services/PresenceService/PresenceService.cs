@@ -41,13 +41,27 @@ namespace OpenSim.Services.PresenceService
 {
     public class PresenceService : PresenceServiceBase, IPresenceService
     {
-        private static readonly ILog m_log =
-                LogManager.GetLogger(
-                MethodBase.GetCurrentMethod().DeclaringType);
+//        private static readonly ILog m_log =
+//                LogManager.GetLogger(
+//                MethodBase.GetCurrentMethod().DeclaringType);
 
         public PresenceService(IConfigSource config)
             : base(config)
         {
+        }
+
+        public bool Report(PresenceInfo presence)
+        {
+            PresenceData p = new PresenceData();
+            p.Data = new Dictionary<string, string>();
+
+            p.UUID = presence.PrincipalID;
+            p.currentRegion = presence.RegionID;
+
+            foreach (KeyValuePair<string, string> kvp in presence.Data)
+                p.Data[kvp.Key] = kvp.Value;
+
+            return false;
         }
     }
 }

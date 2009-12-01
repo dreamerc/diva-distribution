@@ -28,44 +28,77 @@
 using System;
 using System.Collections.Generic;
 using System.Reflection;
-using System.Security.Policy;
-using System.Text;
-using IronPython.Hosting;
 using log4net;
+using OpenMetaverse;
+using OpenSim.Framework;
+using OpenSim.Data;
+using OpenSim.Services.Interfaces;
 using Nini.Config;
-using OpenSim.Region.Framework.Interfaces;
-using OpenSim.Region.Framework.Scenes;
 
-namespace OpenSim.Region.Modules.Python
+namespace OpenSim.Tests.Common.Mock
 {
-    class PythonModule : IRegionModule
+    public class MockAssetService : IAssetService
     {
         private static readonly ILog m_log = LogManager.GetLogger(MethodBase.GetCurrentMethod().DeclaringType);
-        private PythonEngine m_python;
+        
+        private readonly Dictionary<string, AssetBase> Assets = new Dictionary<string, AssetBase>();
 
-        public void Initialise(Scene scene, IConfigSource source)
+        public MockAssetService() {}
+
+        /// <summary>
+        /// This constructor is required if the asset service is being created reflectively (which is the case in some
+        /// tests).
+        /// </summary>
+        /// <param name="config"></param>
+        public MockAssetService(IConfigSource config) {}
+        
+        public AssetBase Get(string id)
         {
+            m_log.DebugFormat("[MOCK ASSET SERVICE]: Getting asset with id {0}", id);
+            
+            AssetBase asset;
+            if (Assets.ContainsKey(id))
+                asset = Assets[id];
+            else
+                asset = null;
+            
+            return asset;
         }
 
-        public void PostInitialise()
+        public AssetMetadata GetMetadata(string id)
         {
-            m_log.Info("[PYTHON] Initialising IronPython engine.");
-            m_python = new PythonEngine();
-            m_python.AddToPath(System.Environment.CurrentDirectory + System.IO.Path.DirectorySeparatorChar + "Python");
+            throw new System.NotImplementedException();
         }
 
-        public void Close()
+        public byte[] GetData(string id)
         {
+            throw new System.NotImplementedException();
         }
 
-        public string Name
+        public bool Get(string id, object sender, AssetRetrieved handler)
         {
-            get { return "PythonModule"; }
+            handler(id, sender, Get(id));
+            
+            return true;
         }
 
-        public bool IsSharedModule
+        public string Store(AssetBase asset)
         {
-            get { return true; }
+            m_log.DebugFormat("[MOCK ASSET SERVICE]: Storing asset {0}", asset.ID);
+            
+            Assets[asset.ID] = asset;
+
+            return asset.ID;
+        }
+
+        public bool UpdateContent(string id, byte[] data)
+        {
+            throw new System.NotImplementedException();
+        }
+
+        public bool Delete(string id)
+        {
+            throw new System.NotImplementedException();
         }
     }
 }

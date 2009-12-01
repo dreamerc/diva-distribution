@@ -486,21 +486,21 @@ namespace OpenSim.Region.CoreModules.World.Permissions
         }
         protected bool IsFriendWithPerms(UUID user,UUID objectOwner)
         {
-        	
-        	if (user == UUID.Zero)
+            
+            if (user == UUID.Zero)
                 return false;
 
             if (m_friendsModule == null)
                 return false;
 
-        	List<FriendListItem> profile = m_friendsModule.GetUserFriends(user);
+            List<FriendListItem> profile = m_friendsModule.GetUserFriends(user);
 
-        	foreach (FriendListItem item in profile)
-        	{
-        		if(item.Friend == objectOwner && (item.FriendPerms & (uint)FriendRights.CanModifyObjects) != 0)
+            foreach (FriendListItem item in profile)
+            {
+                if (item.Friend == objectOwner && (item.FriendPerms & (uint)FriendRights.CanModifyObjects) != 0)
                     return true;
-        	}
-        	return false;
+            }
+            return false;
         }
 
         protected bool IsEstateManager(UUID user)
@@ -800,30 +800,31 @@ namespace OpenSim.Region.CoreModules.World.Permissions
         }
     
         protected bool GenericParcelOwnerPermission(UUID user, ILandObject parcel, ulong groupPowers)
-        {
-            bool permission = false;
-
+        {          
             if (parcel.LandData.OwnerID == user)
             {
-                permission = true;
+                // Returning immediately so that group deeded objects on group deeded land don't trigger a NRE on
+                // the subsequent redundant checks when using lParcelMediaCommandList()
+                // See http://opensimulator.org/mantis/view.php?id=3999 for more details
+                return true;
             }
 
             if (parcel.LandData.IsGroupOwned && IsGroupMember(parcel.LandData.GroupID, user, groupPowers))
             {
-                permission = true;
+                return true;
             }
     
             if (IsEstateManager(user))
             {
-                permission = true;
+                return true;
             }
 
             if (IsAdministrator(user))
             {
-                permission = true;
+                return true;
             }
 
-            return permission;
+            return false;
         }
 
         protected bool GenericParcelPermission(UUID user, Vector3 pos, ulong groupPowers)

@@ -28,37 +28,38 @@
 using System;
 using System.Collections.Generic;
 using OpenMetaverse;
-using OpenSim.Framework;
-using OpenSim.Data;
+using OpenSim.Region.Framework.Interfaces;
+using OpenSim.Region.Framework.Scenes;
 
-namespace OpenSim.Tests.Common.Mock
+namespace OpenSim.Region.RegionCombinerModule
 {
-    /// <summary>
-    /// In memory asset data plugin for test purposes.  Could be another dll when properly filled out and when the
-    /// mono addin plugin system starts co-operating with the unit test system.  Currently no locking since unit
-    /// tests are single threaded.
-    /// </summary>
-    public class TestAssetDataPlugin : BaseAssetRepository, IAssetDataPlugin
+    public class RegionConnections
     {
-        public string Version { get { return "0"; } }
-        public string Name { get { return "TestAssetDataPlugin"; } }
+        /// <summary>
+        /// Root Region ID
+        /// </summary>
+        public UUID RegionId;
 
-        public void Initialise() {}
-        public void Initialise(string connect) {}
-        public void Dispose() {}
+        /// <summary>
+        /// Root Region Scene
+        /// </summary>
+        public Scene RegionScene;
 
-        private readonly List<AssetBase> assets = new List<AssetBase>();
-
-        public AssetBase GetAsset(UUID uuid)
+        /// <summary>
+        /// LargeLandChannel for combined region
+        /// </summary>
+        public ILandChannel RegionLandChannel;
+        public uint X;
+        public uint Y;
+        public int XEnd;
+        public int YEnd;
+        public List<RegionData> ConnectedRegions;
+        public RegionCombinerPermissionModule PermissionModule;
+        public RegionCombinerClientEventForwarder ClientEventForwarder;
+        public void UpdateExtents(Vector3 extents)
         {
-            return assets.Find(x=>x.FullID == uuid);
+            XEnd = (int)extents.X;
+            YEnd = (int)extents.Y;
         }
-
-        public void StoreAsset(AssetBase asset)
-        {
-            assets.Add(asset);
-        }
-
-        public List<AssetMetadata> FetchAssetMetadataSet(int start, int count) { return new List<AssetMetadata>(count); }
     }
 }

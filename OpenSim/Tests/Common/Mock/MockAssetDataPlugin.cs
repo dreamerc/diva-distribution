@@ -25,41 +25,40 @@
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-using log4net.Config;
-using Nini.Config;
+using System;
+using System.Collections.Generic;
+using OpenMetaverse;
+using OpenSim.Framework;
+using OpenSim.Data;
 
-namespace OpenSim.Grid.GridServer
+namespace OpenSim.Tests.Common.Mock
 {
-    public class Program
+    /// <summary>
+    /// In memory asset data plugin for test purposes.  Could be another dll when properly filled out and when the
+    /// mono addin plugin system starts co-operating with the unit test system.  Currently no locking since unit
+    /// tests are single threaded.
+    /// </summary>
+    public class MockAssetDataPlugin : BaseAssetRepository, IAssetDataPlugin
     {
-        public static void Main(string[] args)
+        public string Version { get { return "0"; } }
+        public string Name { get { return "MockAssetDataPlugin"; } }
+
+        public void Initialise() {}
+        public void Initialise(string connect) {}
+        public void Dispose() {}
+
+        private readonly List<AssetBase> assets = new List<AssetBase>();
+
+        public AssetBase GetAsset(UUID uuid)
         {
-            ArgvConfigSource argvSource = new ArgvConfigSource(args);
-            argvSource.AddSwitch("Startup", "console", "c");
-            argvSource.AddSwitch("Startup", "xmlfile", "x");
-
-            XmlConfigurator.Configure();
-
-            GridServerBase app = new GridServerBase();
-
-            IConfig startupConfig = argvSource.Configs["Startup"];
-            if (startupConfig != null)
-            {
-                app.m_consoleType = startupConfig.GetString("console", "local");
-                app.m_configFile = startupConfig.GetString("xmlfile", "GridServer_Config.xml");
-            }
-
-            app.m_configSource = argvSource;
-
-//            if (args.Length > 0 && args[0] == "-setuponly")
-//            {
-//                app.Config();
-//            }
-//            else
-//            {
-                app.Startup();
-                app.Work();
-//            }
+            return assets.Find(x=>x.FullID == uuid);
         }
+
+        public void StoreAsset(AssetBase asset)
+        {
+            assets.Add(asset);
+        }
+
+        public List<AssetMetadata> FetchAssetMetadataSet(int start, int count) { return new List<AssetMetadata>(count); }
     }
 }

@@ -1,4 +1,4 @@
-﻿/*
+/*
  * Copyright (c) Contributors, http://opensimulator.org/
  * See CONTRIBUTORS.TXT for a full list of copyright holders.
  *
@@ -28,6 +28,7 @@
 using System;
 using System.Collections.Generic;
 using System.Net;
+using System.Threading;
 using log4net;
 using OpenSim.Framework;
 using OpenMetaverse;
@@ -430,6 +431,7 @@ namespace OpenSim.Region.ClientStack.LindenUDP
                         m_udpServer.SendPacketFinal(nextPacket);
                         m_nextPackets[i] = null;
                         packetSent = true;
+                        this.PacketsSent++;
                     }
                 }
                 else
@@ -446,6 +448,7 @@ namespace OpenSim.Region.ClientStack.LindenUDP
                             // Send the packet
                             m_udpServer.SendPacketFinal(packet);
                             packetSent = true;
+                            this.PacketsSent++;
                         }
                         else
                         {

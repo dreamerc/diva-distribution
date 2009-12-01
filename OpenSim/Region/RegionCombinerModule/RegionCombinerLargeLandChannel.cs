@@ -30,8 +30,9 @@ using System.Collections.Generic;
 using OpenMetaverse;
 using OpenSim.Framework;
 using OpenSim.Region.Framework.Interfaces;
+using OpenSim.Region.CoreModules.World.Land;
 
-namespace OpenSim.Region.CoreModules.World.Land
+namespace OpenSim.Region.RegionCombinerModule
 {
 public class RegionCombinerLargeLandChannel : ILandChannel
     {
@@ -117,6 +118,7 @@ public class RegionCombinerLargeLandChannel : ILandChannel
                         return regionData.RegionScene.LandChannel.GetLandObject(x - offsetX, y - offsetY);
                     }
                 }
+                
                 ILandObject obj = new LandObject(UUID.Zero, false, RegData.RegionScene);
                 obj.LandData.Name = "NO LAND";
                 return obj;

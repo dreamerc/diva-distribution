@@ -25,39 +25,15 @@
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-using System.Collections.Generic;
-using System.Xml;
 using OpenMetaverse;
+using OpenSim.Region.Framework.Scenes;
 
-namespace OpenSim.Region.Framework.Scenes
+namespace OpenSim.Region.RegionCombinerModule
 {
-    public class AvatarAnimations
+    public class RegionData
     {
-        public Dictionary<string, UUID> AnimsUUID = new Dictionary<string, UUID>();
-        public Dictionary<UUID, string> AnimsNames = new Dictionary<UUID, string>();
-        public Dictionary<UUID, string> AnimStateNames = new Dictionary<UUID, string>();
-
-        public AvatarAnimations()
-        {
-            using (XmlTextReader reader = new XmlTextReader("data/avataranimations.xml"))
-            {
-                XmlDocument doc = new XmlDocument();
-                doc.Load(reader);
-                foreach (XmlNode nod in doc.DocumentElement.ChildNodes)
-                {
-                    if (nod.Attributes["name"] != null)
-                    {
-                        string name = (string)nod.Attributes["name"].Value;
-                        UUID id = (UUID)nod.InnerText;
-                        string animState = (string)nod.Attributes["state"].Value;
-
-                        AnimsUUID.Add(name, id);
-                        AnimsNames.Add(id, name);
-                        if (animState != "")
-                            AnimStateNames.Add(id, animState);
-                    }
-                }
-            }
-        }
+        public UUID RegionId;
+        public Scene RegionScene;
+        public Vector3 Offset;
     }
 }

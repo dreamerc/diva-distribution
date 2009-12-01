@@ -232,7 +232,7 @@ namespace OpenSim
                                           "Save named prim to XML2", SavePrimsXml2);
 
             m_console.Commands.AddCommand("region", false, "load oar",
-                                          "load oar <oar name>",
+                                          "load oar [--merge] <oar name>",
                                           "Load a region's data from OAR archive", LoadOar);
 
             m_console.Commands.AddCommand("region", false, "save oar",
@@ -939,8 +939,8 @@ namespace OpenSim
                     m_log.Info(String.Format("\nAgents connected: {0}\n", agents.Count));
 
                     m_log.Info(
-                        String.Format("{0,-16}{1,-16}{2,-37}{3,-11}{4,-16}", "Firstname", "Lastname",
-                                      "Agent ID", "Root/Child", "Region"));
+                        String.Format("{0,-16}{1,-16}{2,-37}{3,-11}{4,-16}{5,-30}", "Firstname", "Lastname",
+                                      "Agent ID", "Root/Child", "Region", "Position"));
 
                     foreach (ScenePresence presence in agents)
                     {
@@ -958,12 +958,13 @@ namespace OpenSim
 
                         m_log.Info(
                             String.Format(
-                                "{0,-16}{1,-16}{2,-37}{3,-11}{4,-16}",
+                                "{0,-16}{1,-16}{2,-37}{3,-11}{4,-16}{5,-30}",
                                 presence.Firstname,
                                 presence.Lastname,
                                 presence.UUID,
                                 presence.IsChildAgent ? "Child" : "Root",
-                                regionName));
+                                regionName,
+                                presence.AbsolutePosition.ToString()));
                     }
 
                     m_log.Info(String.Empty);
@@ -1294,14 +1295,7 @@ namespace OpenSim
         {
             try
             {
-                if (cmdparams.Length > 2)
-                {
-                    m_sceneManager.LoadArchiveToCurrentScene(cmdparams[2]);
-                }
-                else
-                {
-                    m_sceneManager.LoadArchiveToCurrentScene(DEFAULT_OAR_BACKUP_FILENAME);
-                }
+                m_sceneManager.LoadArchiveToCurrentScene(cmdparams);
             }
             catch (Exception e)
             {
@@ -1315,14 +1309,7 @@ namespace OpenSim
         /// <param name="cmdparams"></param>
         protected void SaveOar(string module, string[] cmdparams)
         {
-            if (cmdparams.Length > 2)
-            {
-                m_sceneManager.SaveCurrentSceneToArchive(cmdparams[2]);
-            }
-            else
-            {
-                m_sceneManager.SaveCurrentSceneToArchive(DEFAULT_OAR_BACKUP_FILENAME);
-            }
+            m_sceneManager.SaveCurrentSceneToArchive(cmdparams);
         }
 
         private static string CombineParams(string[] commandParams, int pos)
