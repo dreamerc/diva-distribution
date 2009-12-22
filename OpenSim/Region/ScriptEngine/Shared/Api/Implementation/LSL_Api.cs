@@ -2724,7 +2724,8 @@ namespace OpenSim.Region.ScriptEngine.Shared.Api
         public void llStopLookAt()
         {
             m_host.AddScriptLPS(1);
-            NotImplemented("llStopLookAt");
+//            NotImplemented("llStopLookAt");
+            m_host.StopLookAt();
         }
 
         public void llSetTimerEvent(double sec)
@@ -3071,7 +3072,8 @@ namespace OpenSim.Region.ScriptEngine.Shared.Api
         public void llRotLookAt(LSL_Rotation target, double strength, double damping)
         {
             m_host.AddScriptLPS(1);
-            NotImplemented("llRotLookAt");
+//            NotImplemented("llRotLookAt");
+            m_host.RotLookAt(Rot2Quaternion(target), (float)strength, (float)damping);
         }
 
         public LSL_Integer llStringLength(string str)
@@ -4412,8 +4414,8 @@ namespace OpenSim.Region.ScriptEngine.Shared.Api
 
             double x, y, z, s, t;
 
-            s = Math.Cos(angle / 2);
-            t = Math.Sin(angle / 2); // temp value to avoid 2 more sin() calcs
+            s = Math.Cos(angle * 0.5);
+            t = Math.Sin(angle * 0.5); // temp value to avoid 2 more sin() calcs
             x = axis.x * t;
             y = axis.y * t;
             z = axis.z * t;
@@ -5801,7 +5803,7 @@ namespace OpenSim.Region.ScriptEngine.Shared.Api
             m_host.AddScriptLPS(1);
             return World.SimulatorFPS;
         }
-		
+        
 
         /* particle system rules should be coming into this routine as doubles, that is
         rule[0] should be an integer from this list and rule[1] should be the arg
@@ -7401,9 +7403,17 @@ namespace OpenSim.Region.ScriptEngine.Shared.Api
                         break;
 
                     case (int)ScriptBaseClass.PRIM_POSITION:
-                        res.Add(new LSL_Vector(part.AbsolutePosition.X,
+                        LSL_Vector v = new LSL_Vector(part.AbsolutePosition.X,
                                                       part.AbsolutePosition.Y,
-                                                      part.AbsolutePosition.Z));
+                                                      part.AbsolutePosition.Z);
+                        // For some reason, the part.AbsolutePosition.* values do not change if the
+                        // linkset is rotated; they always reflect the child prim's world position
+                        // as though the linkset is unrotated. This is incompatible behavior with SL's
+                        // implementation, so will break scripts imported from there (not to mention it
+                        // makes it more difficult to determine a child prim's actual inworld position).
+                        if (part.ParentID != 0)
+                            v = ((v - llGetRootPosition()) * llGetRootRotation()) + llGetRootPosition();
+                        res.Add( v );
                         break;
 
                     case (int)ScriptBaseClass.PRIM_SIZE:
@@ -7421,6 +7431,8 @@ namespace OpenSim.Region.ScriptEngine.Shared.Api
                         PrimitiveBaseShape Shape = part.Shape;
                         int primType = getScriptPrimType(part.Shape);
                         res.Add(new LSL_Integer(primType));
+                        double topshearx = (double)(sbyte)Shape.PathShearX / 100.0; // Fix negative values for PathShearX
+                        double topsheary = (double)(sbyte)Shape.PathShearY / 100.0; // and PathShearY.
                         switch (primType)
                         {
                             case ScriptBaseClass.PRIM_TYPE_BOX:
@@ -7431,7 +7443,7 @@ namespace OpenSim.Region.ScriptEngine.Shared.Api
                                 res.Add(new LSL_Float(Shape.ProfileHollow / 50000.0));
                                 res.Add(new LSL_Vector(Shape.PathTwistBegin / 100.0, Shape.PathTwist / 100.0, 0));
                                 res.Add(new LSL_Vector(1 - (Shape.PathScaleX / 100.0 - 1), 1 - (Shape.PathScaleY / 100.0 - 1), 0));
-                                res.Add(new LSL_Vector(Shape.PathShearX / 100.0, Shape.PathShearY / 100.0, 0));
+                                res.Add(new LSL_Vector(topshearx, topsheary, 0));
                                 break;
 
                             case ScriptBaseClass.PRIM_TYPE_SPHERE:
@@ -7466,7 +7478,7 @@ namespace OpenSim.Region.ScriptEngine.Shared.Api
                                 res.Add(new LSL_Vector(1 - (Shape.PathScaleX / 100.0 - 1), 1 - (Shape.PathScaleY / 100.0 - 1), 0));
 
                                 // vector topshear
-                                res.Add(new LSL_Vector(Shape.PathShearX / 100.0, Shape.PathShearY / 100.0, 0));
+                                res.Add(new LSL_Vector(topshearx, topsheary, 0));
 
                                 // vector profilecut
                                 res.Add(new LSL_Vector(Shape.ProfileBegin / 50000.0, 1 - Shape.ProfileEnd / 50000.0, 0));
@@ -7475,8 +7487,11 @@ namespace OpenSim.Region.ScriptEngine.Shared.Api
                                 res.Add(new LSL_Vector(Shape.PathTaperX / 100.0, Shape.PathTaperY / 100.0, 0));
 
                                 // float revolutions
-                                res.Add(new LSL_Float(Shape.PathRevolutions / 50.0)); // needs fixing :(
-
+                                res.Add(new LSL_Float((Shape.PathRevolutions * 0.015) + 1.0)); // Slightly inaccurate, because an unsigned
+                                                                                               // byte is being used to represent the entire
+                                                                                               // range of floating-point values from 1.0
+                                                                                               // through 4.0 (which is how SL does it). 
+                        
                                 // float radiusoffset
                                 res.Add(new LSL_Float(Shape.PathRadiusOffset / 100.0));
 
