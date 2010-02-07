@@ -56,21 +56,6 @@ namespace OpenSim.Client.Linden
         protected bool authenticate;
         protected string welcomeMessage;
 
-        public bool RegionLoginsEnabled
-        {
-            get
-            {
-                if (m_firstScene != null)
-                {
-                    return m_firstScene.SceneGridService.RegionLoginsEnabled;
-                }
-                else
-                {
-                    return false;
-                }
-            }
-        }
-
         protected LLStandaloneLoginService m_loginService;
 
         #region IRegionModule Members
@@ -199,7 +184,7 @@ namespace OpenSim.Client.Linden
             Scene scene;
             if (TryGetRegion(regionHandle, out scene))
             {
-                return scene.NewUserConnection(agent, out reason);
+                return scene.NewUserConnection(agent, (uint)TeleportFlags.ViaLogin, out reason);
             }
             reason = "Region not found.";
             return false;

@@ -104,6 +104,8 @@ namespace OpenSim.Region.Framework.Scenes
         }
         protected ScenePresenceAnimator m_animator;
 
+        protected List<SceneObjectGroup> m_attachments = new List<SceneObjectGroup>();
+
         private Dictionary<UUID, ScriptControllers> scriptedcontrols = new Dictionary<UUID, ScriptControllers>();
         private ScriptControlled IgnoredControls = ScriptControlled.CONTROL_ZERO;
         private ScriptControlled LastCommands = ScriptControlled.CONTROL_ZERO;
@@ -124,6 +126,7 @@ namespace OpenSim.Region.Framework.Scenes
         private Vector3? m_forceToApply;
         private uint m_requestedSitTargetID;
         private UUID m_requestedSitTargetUUID;
+        public bool SitGround = false;
 
         private SendCourseLocationsMethod m_sendCourseLocationsMethod;
 
@@ -169,7 +172,7 @@ namespace OpenSim.Region.Framework.Scenes
         protected RegionInfo m_regionInfo;
         protected ulong crossingFromRegion;
 
-        private readonly Vector3[] Dir_Vectors = new Vector3[6];
+        private readonly Vector3[] Dir_Vectors = new Vector3[9];
 
         // Position of agent's camera in world (region cordinates)
         protected Vector3 m_CameraCenter;
@@ -214,9 +217,7 @@ namespace OpenSim.Region.Framework.Scenes
         // Agent's Draw distance.
         protected float m_DrawDistance;
 
-        protected AvatarAppearance m_appearance;
-
-        protected List<SceneObjectGroup> m_attachments = new List<SceneObjectGroup>();
+        protected AvatarAppearance m_appearance;        
 
         // neighbouring regions we have enabled a child agent in
         // holds the seed cap for the child agent in that region
@@ -233,6 +234,8 @@ namespace OpenSim.Region.Framework.Scenes
             DIR_CONTROL_FLAG_RIGHT = AgentManager.ControlFlags.AGENT_CONTROL_LEFT_NEG,
             DIR_CONTROL_FLAG_UP = AgentManager.ControlFlags.AGENT_CONTROL_UP_POS,
             DIR_CONTROL_FLAG_DOWN = AgentManager.ControlFlags.AGENT_CONTROL_UP_NEG,
+            DIR_CONTROL_FLAG_FORWARD_NUDGE = AgentManager.ControlFlags.AGENT_CONTROL_NUDGE_AT_POS,
+            DIR_CONTROL_FLAG_BACKWARD_NUDGE = AgentManager.ControlFlags.AGENT_CONTROL_NUDGE_AT_NEG,
             DIR_CONTROL_FLAG_DOWN_NUDGE = AgentManager.ControlFlags.AGENT_CONTROL_NUDGE_UP_NEG
         }
         
@@ -627,12 +630,16 @@ namespace OpenSim.Region.Framework.Scenes
         #endregion
 
         #region Constructor(s)
-
-        private ScenePresence(IClientAPI client, Scene world, RegionInfo reginfo)
-        {
-            m_animator = new ScenePresenceAnimator(this);
+        
+        public ScenePresence()
+        {            
             m_sendCourseLocationsMethod = SendCoarseLocationsDefault;
             CreateSceneViewer();
+            m_animator = new ScenePresenceAnimator(this);
+        }
+        
+        private ScenePresence(IClientAPI client, Scene world, RegionInfo reginfo) : this()
+        {
             m_rootRegionHandle = reginfo.RegionHandle;
             m_controllingClient = client;
             m_firstname = m_controllingClient.FirstName;
@@ -655,7 +662,6 @@ namespace OpenSim.Region.Framework.Scenes
             m_reprioritization_timer = new Timer(world.ReprioritizationInterval);
             m_reprioritization_timer.Elapsed += new ElapsedEventHandler(Reprioritize);
             m_reprioritization_timer.AutoReset = false;
-
 
             AdjustKnownSeeds();
 
@@ -717,19 +723,23 @@ namespace OpenSim.Region.Framework.Scenes
             Dir_Vectors[3] = -Vector3.UnitY; //RIGHT
             Dir_Vectors[4] = Vector3.UnitZ; //UP
             Dir_Vectors[5] = -Vector3.UnitZ; //DOWN
-            Dir_Vectors[5] = new Vector3(0f, 0f, -0.5f); //DOWN_Nudge
+            Dir_Vectors[8] = new Vector3(0f, 0f, -0.5f); //DOWN_Nudge
+            Dir_Vectors[6] = Vector3.UnitX*2; //FORWARD
+            Dir_Vectors[7] = -Vector3.UnitX; //BACK
         }
 
         private Vector3[] GetWalkDirectionVectors()
         {
-            Vector3[] vector = new Vector3[6];
+            Vector3[] vector = new Vector3[9];
             vector[0] = new Vector3(m_CameraUpAxis.Z, 0f, -m_CameraAtAxis.Z); //FORWARD
             vector[1] = new Vector3(-m_CameraUpAxis.Z, 0f, m_CameraAtAxis.Z); //BACK
             vector[2] = Vector3.UnitY; //LEFT
             vector[3] = -Vector3.UnitY; //RIGHT
             vector[4] = new Vector3(m_CameraAtAxis.Z, 0f, m_CameraUpAxis.Z); //UP
             vector[5] = new Vector3(-m_CameraAtAxis.Z, 0f, -m_CameraUpAxis.Z); //DOWN
-            vector[5] = new Vector3(-m_CameraAtAxis.Z, 0f, -m_CameraUpAxis.Z); //DOWN_Nudge
+            vector[8] = new Vector3(-m_CameraAtAxis.Z, 0f, -m_CameraUpAxis.Z); //DOWN_Nudge
+            vector[6] = (new Vector3(m_CameraUpAxis.Z, 0f, -m_CameraAtAxis.Z) * 2); //FORWARD Nudge
+            vector[7] = new Vector3(-m_CameraUpAxis.Z, 0f, m_CameraAtAxis.Z); //BACK Nudge
             return vector;
         }
 
@@ -1248,7 +1258,9 @@ namespace OpenSim.Region.Framework.Scenes
                 // TODO: This doesn't prevent the user from walking yet.
                 // Setting parent ID would fix this, if we knew what value
                 // to use.  Or we could add a m_isSitting variable.
-                Animator.TrySetMovementAnimation("SIT_GROUND_CONSTRAINED");
+                //Animator.TrySetMovementAnimation("SIT_GROUND_CONSTRAINED");
+                SitGround = true;
+                
             }
 
             // In the future, these values might need to go global.
@@ -1267,6 +1279,12 @@ namespace OpenSim.Region.Framework.Scenes
 
             if (m_allowMovement)
             {
+                if (agentData.UseClientAgentPosition)
+                {
+                    m_moveToPositionInProgress = (agentData.ClientAgentPosition - AbsolutePosition).Length() > 0.2f;
+                    m_moveToPositionTarget = agentData.ClientAgentPosition;
+                }
+
                 int i = 0;
                 
                 bool update_rotation = false;
@@ -1306,6 +1324,9 @@ namespace OpenSim.Region.Framework.Scenes
                     else
                         dirVectors = Dir_Vectors;
 
+                    // The fact that m_movementflag is a byte needs to be fixed
+                    // it really should be a uint
+                    uint nudgehack = 250;
                     foreach (Dir_ControlFlags DCF in DIR_CONTROL_FLAGS)
                     {
                         if (((uint)flags & (uint)DCF) != 0)
@@ -1315,24 +1336,40 @@ namespace OpenSim.Region.Framework.Scenes
                             try
                             {
                                 agent_control_v3 += dirVectors[i];
+                                //m_log.DebugFormat("[Motion]: {0}, {1}",i, dirVectors[i]);
                             }
                             catch (IndexOutOfRangeException)
                             {
                                 // Why did I get this?
                             }
 
-                            if ((m_movementflag & (uint)DCF) == 0)
+                            if ((m_movementflag & (byte)(uint)DCF) == 0)
                             {
+                                if (DCF == Dir_ControlFlags.DIR_CONTROL_FLAG_FORWARD_NUDGE || DCF == Dir_ControlFlags.DIR_CONTROL_FLAG_BACKWARD_NUDGE)
+                                {
+                                    m_movementflag |= (byte)nudgehack;
+                                }
                                 m_movementflag += (byte)(uint)DCF;
                                 update_movementflag = true;
                             }
                         }
                         else
                         {
-                            if ((m_movementflag & (uint)DCF) != 0)
+                            if ((m_movementflag & (byte)(uint)DCF) != 0 ||
+                                ((DCF == Dir_ControlFlags.DIR_CONTROL_FLAG_FORWARD_NUDGE || DCF == Dir_ControlFlags.DIR_CONTROL_FLAG_BACKWARD_NUDGE)
+                                && ((m_movementflag & (byte)nudgehack) == nudgehack))
+                                ) // This or is for Nudge forward
                             {
-                                m_movementflag -= (byte)(uint)DCF;
+                                m_movementflag -= ((byte)(uint)DCF);
+
                                 update_movementflag = true;
+                                /*
+                                    if ((DCF == Dir_ControlFlags.DIR_CONTROL_FLAG_FORWARD_NUDGE || DCF == Dir_ControlFlags.DIR_CONTROL_FLAG_BACKWARD_NUDGE)
+                                    && ((m_movementflag & (byte)nudgehack) == nudgehack))
+                                    {
+                                        m_log.Debug("Removed Hack flag");
+                                    }
+                                */
                             }
                             else
                             {
@@ -1354,7 +1391,7 @@ namespace OpenSim.Region.Framework.Scenes
                     if (bAllowUpdateMoveToPosition && (m_moveToPositionInProgress && !m_autopilotMoving))
                     {
                         //Check the error term of the current position in relation to the target position
-                        if (Util.GetDistanceTo(AbsolutePosition, m_moveToPositionTarget) <= 1.5f)
+                        if (Util.GetDistanceTo(AbsolutePosition, m_moveToPositionTarget) <= 0.5f)
                         {
                             // we are close enough to the target
                             m_moveToPositionTarget = Vector3.Zero;
@@ -1470,7 +1507,7 @@ namespace OpenSim.Region.Framework.Scenes
                 }
             }
 
-            if (update_movementflag)
+            if (update_movementflag && ((flags & AgentManager.ControlFlags.AGENT_CONTROL_SIT_ON_GROUND) == 0) && (m_parentID == 0) && !SitGround)
                 Animator.UpdateMovementAnimations();
 
             m_scene.EventManager.TriggerOnClientMovement(this);
@@ -1582,8 +1619,12 @@ namespace OpenSim.Region.Framework.Scenes
         /// </summary>
         public void StandUp()
         {
+            if (SitGround)
+                SitGround = false;
+
             if (m_parentID != 0)
             {
+                m_log.Debug("StandupCode Executed");
                 SceneObjectPart part = m_scene.GetSceneObjectPart(m_parentID);
                 if (part != null)
                 {
@@ -1819,7 +1860,7 @@ namespace OpenSim.Region.Framework.Scenes
                     if (collisionPoint.ApproxEquals(m_requestedSitOffset + part.AbsolutePosition, 0.2f))
                     {
                         SitRaycastFindEdge(collisionPoint, normal);
-                        m_log.DebugFormat("[SIT]: Raycast Avatar Position succeeded at point: {0}, normal:{1}", collisionPoint, normal );
+                        m_log.DebugFormat("[SIT]: Raycast Avatar Position succeeded at point: {0}, normal:{1}", collisionPoint, normal);
                     }
                     else
                     {
@@ -2741,7 +2782,14 @@ namespace OpenSim.Region.Framework.Scenes
         protected void CrossToNewRegion()
         {
             InTransit();
-            m_scene.CrossAgentToNewRegion(this, m_physicsActor.Flying);
+            try
+            {
+                m_scene.CrossAgentToNewRegion(this, m_physicsActor.Flying);
+            }
+            catch
+            {
+                m_scene.CrossAgentToNewRegion(this, false);
+            }
         }
 
         public void InTransit()
@@ -2819,7 +2867,6 @@ namespace OpenSim.Region.Framework.Scenes
             {
                 RemoveNeighbourRegion(handle);
             }
-
         }
 
         #endregion
@@ -2980,7 +3027,7 @@ namespace OpenSim.Region.Framework.Scenes
             List<int> attPoints = m_appearance.GetAttachedPoints();
             if (attPoints != null)
             {
-                m_log.DebugFormat("[SCENE PRESENCE]: attachments {0}", attPoints.Count);
+                //m_log.DebugFormat("[SCENE PRESENCE]: attachments {0}", attPoints.Count);
                 int i = 0;
                 AttachmentData[] attachs = new AttachmentData[attPoints.Count];
                 foreach (int point in attPoints)
@@ -3204,17 +3251,15 @@ namespace OpenSim.Region.Framework.Scenes
             uint killerObj = 0;
             foreach (uint localid in coldata.Keys)
             {
-                if (coldata[localid].PenetrationDepth <= 0.10f || m_invulnerable)
-                    continue;
-                //if (localid == 0)
-                    //continue;
-
-                SceneObjectPart part = m_scene.GetSceneObjectPart(localid);
+                SceneObjectPart part = Scene.GetSceneObjectPart(localid);
 
                 if (part != null && part.ParentGroup.Damage != -1.0f)
                     Health -= part.ParentGroup.Damage;
                 else
-                    Health -= coldata[localid].PenetrationDepth * 5.0f;
+                {
+                    if (coldata[localid].PenetrationDepth >= 0.10f)
+                        Health -= coldata[localid].PenetrationDepth * 5.0f;
+                }
 
                 if (Health <= 0.0f)
                 {
@@ -3232,9 +3277,7 @@ namespace OpenSim.Region.Framework.Scenes
                 }
                 if (m_health <= 0)
                     m_scene.EventManager.TriggerAvatarKill(killerObj, this);
-            }
-
-            
+            }            
         }
 
         public void setHealthWithUpdate(float health)
@@ -3279,13 +3322,6 @@ namespace OpenSim.Region.Framework.Scenes
             RemoveFromPhysicalScene();
             m_animator.Close();
             m_animator = null;
-        }
-
-        public ScenePresence()
-        {
-            m_sendCourseLocationsMethod = SendCoarseLocationsDefault;
-            CreateSceneViewer();
-            m_animator = new ScenePresenceAnimator(this);
         }
 
         public void AddAttachment(SceneObjectGroup gobj)

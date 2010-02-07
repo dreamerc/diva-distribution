@@ -2242,6 +2242,7 @@
       <Reference name="OpenMetaverseTypes.dll"/>
       <Reference name="OpenMetaverse.dll"/>
       <Reference name="Nini.dll" />
+      <Reference name="Mono.Addins" />
       <Reference name="log4net.dll" />
       <Files>
         <Match pattern="*.cs" recurse="true"/>
@@ -2302,11 +2303,45 @@
       <Reference name="log4net.dll"/>
       <Reference name="protobuf-net"/>
       <Reference name="MXP.dll"/>
+      <Reference name="Mono.Addins"/>
       <Files>
         <Match pattern="*.cs" recurse="true"/>
       </Files>
     </Project>
 
+
+    <Project frameworkVersion="v3_5" name="OpenSim.Client.Sirikata" path="OpenSim/Client/Sirikata" type="Library">
+      <Configuration name="Debug">
+        <Options>
+          <OutputPath>../../../bin/</OutputPath>
+        </Options>
+      </Configuration>
+      <Configuration name="Release">
+        <Options>
+          <OutputPath>../../../bin/</OutputPath>
+        </Options>
+      </Configuration>
+
+      <ReferencePath>../../../bin/</ReferencePath>
+
+      <Reference name="OpenMetaverseTypes.dll"/>
+      <Reference name="OpenMetaverse.dll"/>
+      <Reference name="System"/>
+	  <Reference name="System.Drawing"/>
+      <Reference name="OpenSim.Framework"/>
+	  <Reference name="OpenSim.Framework.Servers"/>
+	  <Reference name="OpenSim.Framework.Servers.HttpServer"/>
+      <Reference name="OpenSim.Region.Framework"/>
+      <Reference name="OpenSim.Framework.Communications"/>
+      <Reference name="OpenSim.Services.Interfaces"/>
+      <Reference name="Nini.dll" />
+      <Reference name="log4net.dll"/>
+	  <Reference name="Google.ProtocolBuffers.dll"/>
+      <Files>
+        <Match pattern="*.cs" recurse="true"/>
+      </Files>
+	</Project>
+	
     <Project frameworkVersion="v3_5" name="OpenSim.Client.VWoHTTP" path="OpenSim/Client/VWoHTTP" type="Library">
       <Configuration name="Debug">
         <Options>
@@ -2779,6 +2814,7 @@
       <Reference name="OpenSim.Framework.Statistics"/>
       <Reference name="OpenSim.Region.Physics.Manager"/>
       <Reference name="Mono.Data.SqliteClient"/>
+      <Reference name="Mono.Addins"/>
 
       <!-- For scripting in funny languages by default -->
       <Reference name="Microsoft.JScript"/>
@@ -3238,6 +3274,7 @@
         <Match path="Agent/TextureSender/Tests" pattern="*.cs" recurse="true" />
         <Match path="Avatar/Inventory/Archiver/Tests" pattern="*.cs" recurse="true" />
         <Match path="World/Archiver/Tests" pattern="*.cs" recurse="true" />
+        <Match path="World/Archiver/Tests/Resources" pattern="*" buildAction="EmbeddedResource"/>
         <Match path="World/Serialiser/Tests" pattern="*.cs" recurse="true" />
         <Match path="World/Terrain/Tests" pattern="*.cs" recurse="true" />
         <Match path="ServiceConnectorsOut/Grid/Tests" pattern="*.cs" recurse="true" />

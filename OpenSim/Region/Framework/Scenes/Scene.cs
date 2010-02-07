@@ -144,7 +144,7 @@ namespace OpenSim.Region.Framework.Scenes
         public CommunicationsManager CommsManager;
 
         protected SceneCommunicationService m_sceneGridService;
-        public bool loginsdisabled = true;
+        public bool LoginsDisabled = true;
 
         public new float TimeDilation
         {
@@ -387,11 +387,11 @@ namespace OpenSim.Region.Framework.Scenes
         {
             get { return StatsReporter.getLastReportedSimFPS(); }
         }
-		
-		public float[] SimulatorStats
-		{
-			get { return StatsReporter.getLastReportedSimStats(); }
-		}
+        
+        public float[] SimulatorStats
+        {
+            get { return StatsReporter.getLastReportedSimStats(); }
+        }
 
         public string DefaultScriptEngine
         {
@@ -1009,7 +1009,7 @@ namespace OpenSim.Region.Framework.Scenes
                     {
                         if (ent is SceneObjectGroup)
                         {
-                            ((SceneObjectGroup) ent).RemoveScriptInstances();
+                            ((SceneObjectGroup) ent).RemoveScriptInstances(false);
                         }
                     }
                 }
@@ -1275,15 +1275,19 @@ namespace OpenSim.Region.Framework.Scenes
                         StatsReporter.addScriptLines(m_sceneGraph.GetScriptLPS());
                     }
 
-                    if (loginsdisabled && m_frame > 20)
+                    if (LoginsDisabled && m_frame == 20)
                     {
                         // In 99.9% of cases it is a bad idea to manually force garbage collection. However,
                         // this is a rare case where we know we have just went through a long cycle of heap
                         // allocations, and there is no more work to be done until someone logs in
                         GC.Collect();
 
-                        m_log.DebugFormat("[REGION]: Enabling logins for {0}", RegionInfo.RegionName);
-                        loginsdisabled = false;
+                        IConfig startupConfig = m_config.Configs["Startup"];
+                        if (startupConfig == null || !startupConfig.GetBoolean("StartDisabled", false))
+                        {
+                            m_log.DebugFormat("[REGION]: Enabling logins for {0}", RegionInfo.RegionName);
+                            LoginsDisabled = false;
+                        }
                     }
                 }
                 catch (NotImplementedException)
@@ -1558,9 +1562,9 @@ namespace OpenSim.Region.Framework.Scenes
             //m_sceneGridService.RegisterRegion(m_interregionCommsOut, RegionInfo);
 
             GridRegion region = new GridRegion(RegionInfo);
-            bool success = GridService.RegisterRegion(RegionInfo.ScopeID, region);
-            if (!success)
-                throw new Exception("Can't register with grid");
+            string error = GridService.RegisterRegion(RegionInfo.ScopeID, region);
+            if (error != String.Empty)
+                throw new Exception(error);
 
             m_sceneGridService.SetScene(this);
             m_sceneGridService.InformNeighborsThatRegionisUp(RequestModuleInterface<INeighbourService>(), RegionInfo);
@@ -1880,13 +1884,15 @@ namespace OpenSim.Region.Framework.Scenes
         /// <param name="silent">Suppress broadcasting changes to other clients.</param>
         public void DeleteSceneObject(SceneObjectGroup group, bool silent)
         {
+//            m_log.DebugFormat("[SCENE]: Deleting scene object {0} {1}", group.Name, group.UUID);
+            
             //SceneObjectPart rootPart = group.GetChildPart(group.UUID);
 
             // Serialise calls to RemoveScriptInstances to avoid
             // deadlocking on m_parts inside SceneObjectGroup
             lock (m_deleting_scene_object)
             {
-                group.RemoveScriptInstances();
+                group.RemoveScriptInstances(true);
             }
 
             foreach (SceneObjectPart part in group.Children.Values)
@@ -1914,6 +1920,8 @@ namespace OpenSim.Region.Framework.Scenes
             }
 
             group.DeleteGroup(silent);
+
+//            m_log.DebugFormat("[SCENE]: Exit DeleteSceneObject() for {0} {1}", group.Name, group.UUID);
         }
 
         /// <summary>
@@ -2667,6 +2675,7 @@ namespace OpenSim.Region.Framework.Scenes
             client.OnRequestObjectPropertiesFamily += m_sceneGraph.RequestObjectPropertiesFamily;
             client.OnObjectPermissions += HandleObjectPermissionsUpdate;
             client.OnGrabObject += ProcessObjectGrab;
+            client.OnGrabUpdate += ProcessObjectGrabUpdate; 
             client.OnDeGrabObject += ProcessObjectDeGrab;
             client.OnUndo += m_sceneGraph.HandleUndo;
             client.OnObjectDescription += m_sceneGraph.PrimDescription;
@@ -3316,12 +3325,16 @@ namespace OpenSim.Region.Framework.Scenes
         /// Use NewUserConnection() directly if possible so the return type can refuse connections.
         /// At the moment nothing actually seems to use this event,
         /// as everything is switching to calling the NewUserConnection method directly.
+        /// 
+        /// Now obsoleting this because it doesn't handle teleportFlags propertly
+        /// 
         /// </summary>
         /// <param name="agent"></param>
+        [Obsolete("Please call NewUserConnection directly.")]
         public void HandleNewUserConnection(AgentCircuitData agent)
         {
             string reason;
-            NewUserConnection(agent, out reason);
+            NewUserConnection(agent, 0, out reason);
         }
 
         /// <summary>
@@ -3334,18 +3347,26 @@ namespace OpenSim.Region.Framework.Scenes
         /// <param name="reason">Outputs the reason for the false response on this string</param>
         /// <returns>True if the region accepts this agent.  False if it does not.  False will 
         /// also return a reason.</returns>
-        public bool NewUserConnection(AgentCircuitData agent, out string reason)
+        public bool NewUserConnection(AgentCircuitData agent, uint teleportFlags, out string reason)
         {
-            if (loginsdisabled)
+            //Teleport flags:
+            //
+            // TeleportFlags.ViaGodlikeLure - Border Crossing
+            // TeleportFlags.ViaLogin - Login
+            // TeleportFlags.TeleportFlags.ViaLure - Teleport request sent by another user
+            // TeleportFlags.ViaLandmark | TeleportFlags.ViaLocation | TeleportFlags.ViaLandmark | TeleportFlags.Default - Regular Teleport
+
+
+            if (LoginsDisabled)
             {
                 reason = "Logins Disabled";
                 return false;
             }
             // Don't disable this log message - it's too helpful
             m_log.InfoFormat(
-                "[CONNECTION BEGIN]: Region {0} told of incoming {1} agent {2} {3} {4} (circuit code {5})",
+                "[CONNECTION BEGIN]: Region {0} told of incoming {1} agent {2} {3} {4} (circuit code {5}, teleportflags {6})",
                 RegionInfo.RegionName, (agent.child ? "child" : "root"), agent.firstname, agent.lastname,
-                agent.AgentID, agent.circuitcode);
+                agent.AgentID, agent.circuitcode, teleportFlags);
 
             reason = String.Empty;
             if (!AuthenticateUser(agent, out reason))
@@ -3513,8 +3534,35 @@ namespace OpenSim.Region.Framework.Scenes
                 return false;
             }
 
+            IGroupsModule groupsModule =
+                    RequestModuleInterface<IGroupsModule>();
+
+            List<UUID> agentGroups = new List<UUID>();
+
+            if (groupsModule != null)
+            {
+                GroupMembershipData[] GroupMembership =
+                        groupsModule.GetMembershipData(agent.AgentID);
+
+                for (int i = 0; i < GroupMembership.Length; i++)
+                    agentGroups.Add(GroupMembership[i].GroupID);
+            }
+
+            bool groupAccess = false;
+            UUID[] estateGroups = m_regInfo.EstateSettings.EstateGroups;
+
+            foreach (UUID group in estateGroups)
+            {
+                if (agentGroups.Contains(group))
+                {
+                    groupAccess = true;
+                    break;
+                }
+            }
+
             if (!m_regInfo.EstateSettings.PublicAccess &&
-                !m_regInfo.EstateSettings.HasAccess(agent.AgentID))
+                !m_regInfo.EstateSettings.HasAccess(agent.AgentID) &&
+                !groupAccess)
             {
                 m_log.WarnFormat("[CONNECTION BEGIN]: Denied access to: {0} ({1} {2}) at {3} because the user does not have access to the estate",
                                  agent.AgentID, agent.firstname, agent.lastname, RegionInfo.RegionName);

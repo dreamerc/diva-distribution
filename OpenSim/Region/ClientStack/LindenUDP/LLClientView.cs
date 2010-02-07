@@ -298,6 +298,26 @@ namespace OpenSim.Region.ClientStack.LindenUDP
         public event AvatarInterestUpdate OnAvatarInterestUpdate;
         public event PlacesQuery OnPlacesQuery;
         public event AgentFOV OnAgentFOV;
+        public event FindAgentUpdate OnFindAgent;
+        public event TrackAgentUpdate OnTrackAgent;
+        public event NewUserReport OnUserReport;
+        public event SaveStateHandler OnSaveState;
+        public event GroupAccountSummaryRequest OnGroupAccountSummaryRequest;
+        public event GroupAccountDetailsRequest OnGroupAccountDetailsRequest;
+        public event GroupAccountTransactionsRequest OnGroupAccountTransactionsRequest;
+        public event FreezeUserUpdate OnParcelFreezeUser;
+        public event EjectUserUpdate OnParcelEjectUser;
+        public event ParcelBuyPass OnParcelBuyPass;
+        public event ParcelGodMark OnParcelGodMark;
+        public event GroupActiveProposalsRequest OnGroupActiveProposalsRequest;
+        public event GroupVoteHistoryRequest OnGroupVoteHistoryRequest;
+        public event SimWideDeletesDelegate OnSimWideDeletes;
+        public event SendPostcard OnSendPostcard;
+        public event MuteListEntryUpdate OnUpdateMuteListEntry;
+        public event MuteListEntryRemove OnRemoveMuteListEntry;
+        public event GodlikeMessage onGodlikeMessage;
+        public event GodUpdateRegionInfoUpdate OnGodUpdateRegionInfoUpdate;
+        
 
         #endregion Events
 
@@ -806,6 +826,193 @@ namespace OpenSim.Region.ClientStack.LindenUDP
             OutPacket(gmp, ThrottleOutPacketType.Task);
         }
 
+        public void SendGroupActiveProposals(UUID groupID, UUID transactionID, GroupActiveProposals[] Proposals)
+        {
+            int i = 0;
+            foreach (GroupActiveProposals Proposal in Proposals)
+            {
+                GroupActiveProposalItemReplyPacket GAPIRP = new GroupActiveProposalItemReplyPacket();
+                
+                GAPIRP.AgentData.AgentID = AgentId;
+                GAPIRP.AgentData.GroupID = groupID;
+                GAPIRP.TransactionData.TransactionID = transactionID;
+                GAPIRP.TransactionData.TotalNumItems = ((uint)i+1);
+                GroupActiveProposalItemReplyPacket.ProposalDataBlock ProposalData = new GroupActiveProposalItemReplyPacket.ProposalDataBlock();
+                GAPIRP.ProposalData = new GroupActiveProposalItemReplyPacket.ProposalDataBlock[1];
+                ProposalData.VoteCast = Utils.StringToBytes("false");
+                ProposalData.VoteID = new UUID(Proposal.VoteID);
+                ProposalData.VoteInitiator = new UUID(Proposal.VoteInitiator);
+                ProposalData.Majority = (float)Convert.ToInt32(Proposal.Majority);
+                ProposalData.Quorum = Convert.ToInt32(Proposal.Quorum);
+                ProposalData.TerseDateID = Utils.StringToBytes(Proposal.TerseDateID);
+                ProposalData.StartDateTime = Utils.StringToBytes(Proposal.StartDateTime);
+                ProposalData.EndDateTime = Utils.StringToBytes(Proposal.EndDateTime);
+                ProposalData.ProposalText = Utils.StringToBytes(Proposal.ProposalText);
+                ProposalData.AlreadyVoted = false;
+                GAPIRP.ProposalData[i] = ProposalData;
+                OutPacket(GAPIRP, ThrottleOutPacketType.Task);
+                i++;
+            }
+            if (Proposals.Length == 0)
+            {
+                GroupActiveProposalItemReplyPacket GAPIRP = new GroupActiveProposalItemReplyPacket();
+                
+                GAPIRP.AgentData.AgentID = AgentId;
+                GAPIRP.AgentData.GroupID = groupID;
+                GAPIRP.TransactionData.TransactionID = transactionID;
+                GAPIRP.TransactionData.TotalNumItems = 1;
+                GroupActiveProposalItemReplyPacket.ProposalDataBlock ProposalData = new GroupActiveProposalItemReplyPacket.ProposalDataBlock();
+                GAPIRP.ProposalData = new GroupActiveProposalItemReplyPacket.ProposalDataBlock[1];
+                ProposalData.VoteCast = Utils.StringToBytes("false");
+                ProposalData.VoteID = UUID.Zero;
+                ProposalData.VoteInitiator = UUID.Zero;
+                ProposalData.Majority = 0;
+                ProposalData.Quorum = 0;
+                ProposalData.TerseDateID = Utils.StringToBytes("");
+                ProposalData.StartDateTime = Utils.StringToBytes("");
+                ProposalData.EndDateTime = Utils.StringToBytes("");
+                ProposalData.ProposalText = Utils.StringToBytes("");
+                ProposalData.AlreadyVoted = false;
+                GAPIRP.ProposalData[0] = ProposalData;
+                OutPacket(GAPIRP, ThrottleOutPacketType.Task);
+            }
+        }
+
+        public void SendGroupVoteHistory(UUID groupID, UUID transactionID, GroupVoteHistory[] Votes)
+        {
+            int i = 0;
+            foreach (GroupVoteHistory Vote in Votes)
+            {
+                GroupVoteHistoryItemReplyPacket GVHIRP = new GroupVoteHistoryItemReplyPacket();
+
+                GVHIRP.AgentData.AgentID = AgentId;
+                GVHIRP.AgentData.GroupID = groupID;
+                GVHIRP.TransactionData.TransactionID = transactionID;
+                GVHIRP.TransactionData.TotalNumItems = ((uint)i+1);
+                GVHIRP.HistoryItemData.VoteID = new UUID(Vote.VoteID);
+                GVHIRP.HistoryItemData.VoteInitiator = new UUID(Vote.VoteInitiator);
+                GVHIRP.HistoryItemData.Majority = (float)Convert.ToInt32(Vote.Majority);
+                GVHIRP.HistoryItemData.Quorum = Convert.ToInt32(Vote.Quorum);
+                GVHIRP.HistoryItemData.TerseDateID = Utils.StringToBytes(Vote.TerseDateID);
+                GVHIRP.HistoryItemData.StartDateTime = Utils.StringToBytes(Vote.StartDateTime);
+                GVHIRP.HistoryItemData.EndDateTime = Utils.StringToBytes(Vote.EndDateTime);
+                GVHIRP.HistoryItemData.VoteType = Utils.StringToBytes(Vote.VoteType);
+                GVHIRP.HistoryItemData.VoteResult = Utils.StringToBytes(Vote.VoteResult);
+                GVHIRP.HistoryItemData.ProposalText = Utils.StringToBytes(Vote.ProposalText);
+                GroupVoteHistoryItemReplyPacket.VoteItemBlock VoteItem = new GroupVoteHistoryItemReplyPacket.VoteItemBlock();
+                GVHIRP.VoteItem = new GroupVoteHistoryItemReplyPacket.VoteItemBlock[1];
+                VoteItem.CandidateID = UUID.Zero;
+                VoteItem.NumVotes = 0; //TODO: FIX THIS!!!
+                VoteItem.VoteCast = Utils.StringToBytes("Yes");
+                GVHIRP.VoteItem[i] = VoteItem;
+                OutPacket(GVHIRP, ThrottleOutPacketType.Task);
+                i++;
+            }
+            if (Votes.Length == 0)
+            {
+                GroupVoteHistoryItemReplyPacket GVHIRP = new GroupVoteHistoryItemReplyPacket();
+                
+                GVHIRP.AgentData.AgentID = AgentId;
+                GVHIRP.AgentData.GroupID = groupID;
+                GVHIRP.TransactionData.TransactionID = transactionID;
+                GVHIRP.TransactionData.TotalNumItems = 0;
+                GVHIRP.HistoryItemData.VoteID = UUID.Zero;
+                GVHIRP.HistoryItemData.VoteInitiator = UUID.Zero;
+                GVHIRP.HistoryItemData.Majority = 0;
+                GVHIRP.HistoryItemData.Quorum = 0;
+                GVHIRP.HistoryItemData.TerseDateID = Utils.StringToBytes("");
+                GVHIRP.HistoryItemData.StartDateTime = Utils.StringToBytes("");
+                GVHIRP.HistoryItemData.EndDateTime = Utils.StringToBytes("");
+                GVHIRP.HistoryItemData.VoteType = Utils.StringToBytes("");
+                GVHIRP.HistoryItemData.VoteResult = Utils.StringToBytes("");
+                GVHIRP.HistoryItemData.ProposalText = Utils.StringToBytes("");
+                GroupVoteHistoryItemReplyPacket.VoteItemBlock VoteItem = new GroupVoteHistoryItemReplyPacket.VoteItemBlock();
+                GVHIRP.VoteItem = new GroupVoteHistoryItemReplyPacket.VoteItemBlock[1];
+                VoteItem.CandidateID = UUID.Zero;
+                VoteItem.NumVotes = 0; //TODO: FIX THIS!!!
+                VoteItem.VoteCast = Utils.StringToBytes("No");
+                GVHIRP.VoteItem[0] = VoteItem;
+                OutPacket(GVHIRP, ThrottleOutPacketType.Task);
+            }
+        }
+        
+        public void SendGroupAccountingDetails(IClientAPI sender,UUID groupID, UUID transactionID, UUID sessionID, int amt)
+        {
+            GroupAccountDetailsReplyPacket GADRP = new GroupAccountDetailsReplyPacket();
+            GADRP.AgentData = new GroupAccountDetailsReplyPacket.AgentDataBlock();
+            GADRP.AgentData.AgentID = sender.AgentId;
+            GADRP.AgentData.GroupID = groupID;
+            GADRP.HistoryData = new GroupAccountDetailsReplyPacket.HistoryDataBlock[1];
+            GroupAccountDetailsReplyPacket.HistoryDataBlock History = new GroupAccountDetailsReplyPacket.HistoryDataBlock();
+            GADRP.MoneyData = new GroupAccountDetailsReplyPacket.MoneyDataBlock();
+            GADRP.MoneyData.CurrentInterval = 0;
+            GADRP.MoneyData.IntervalDays = 7;
+            GADRP.MoneyData.RequestID = transactionID;
+            GADRP.MoneyData.StartDate = Utils.StringToBytes(DateTime.Today.ToString());
+            History.Amount = amt;
+            History.Description = Utils.StringToBytes("");
+            GADRP.HistoryData[0] = History;
+            OutPacket(GADRP, ThrottleOutPacketType.Task);
+        }
+        
+        public void SendGroupAccountingSummary(IClientAPI sender,UUID groupID, uint moneyAmt, int totalTier, int usedTier)
+        {
+            GroupAccountSummaryReplyPacket GASRP =
+                    (GroupAccountSummaryReplyPacket)PacketPool.Instance.GetPacket(
+                    PacketType.GroupAccountSummaryReply);
+            
+            GASRP.AgentData = new GroupAccountSummaryReplyPacket.AgentDataBlock();
+            GASRP.AgentData.AgentID = sender.AgentId;
+            GASRP.AgentData.GroupID = groupID;
+            GASRP.MoneyData = new GroupAccountSummaryReplyPacket.MoneyDataBlock();
+            GASRP.MoneyData.Balance = (int)moneyAmt;
+            GASRP.MoneyData.TotalCredits = totalTier;
+            GASRP.MoneyData.TotalDebits = usedTier;
+            GASRP.MoneyData.StartDate = new byte[1];
+            GASRP.MoneyData.CurrentInterval = 1;
+            GASRP.MoneyData.GroupTaxCurrent = 0;
+            GASRP.MoneyData.GroupTaxEstimate = 0;
+            GASRP.MoneyData.IntervalDays = 0;
+            GASRP.MoneyData.LandTaxCurrent = 0;
+            GASRP.MoneyData.LandTaxEstimate = 0;
+            GASRP.MoneyData.LastTaxDate = new byte[1];
+            GASRP.MoneyData.LightTaxCurrent = 0;
+            GASRP.MoneyData.TaxDate = new byte[1];
+            GASRP.MoneyData.RequestID = sender.AgentId;
+            GASRP.MoneyData.ParcelDirFeeEstimate = 0;
+            GASRP.MoneyData.ParcelDirFeeCurrent = 0;
+            GASRP.MoneyData.ObjectTaxEstimate = 0;
+            GASRP.MoneyData.NonExemptMembers = 0;
+            GASRP.MoneyData.ObjectTaxCurrent = 0;
+            GASRP.MoneyData.LightTaxEstimate = 0;
+            OutPacket(GASRP, ThrottleOutPacketType.Task);
+        }
+        
+        public void SendGroupTransactionsSummaryDetails(IClientAPI sender,UUID groupID, UUID transactionID, UUID sessionID, int amt)
+        {
+            GroupAccountTransactionsReplyPacket GATRP =
+                    (GroupAccountTransactionsReplyPacket)PacketPool.Instance.GetPacket(
+                    PacketType.GroupAccountTransactionsReply);
+            
+            GATRP.AgentData = new GroupAccountTransactionsReplyPacket.AgentDataBlock();
+            GATRP.AgentData.AgentID = sender.AgentId;
+            GATRP.AgentData.GroupID = groupID;
+            GATRP.MoneyData = new GroupAccountTransactionsReplyPacket.MoneyDataBlock();
+            GATRP.MoneyData.CurrentInterval = 0;
+            GATRP.MoneyData.IntervalDays = 7;
+            GATRP.MoneyData.RequestID = transactionID;
+            GATRP.MoneyData.StartDate = Utils.StringToBytes(DateTime.Today.ToString());
+            GATRP.HistoryData = new GroupAccountTransactionsReplyPacket.HistoryDataBlock[1];
+            GroupAccountTransactionsReplyPacket.HistoryDataBlock History = new GroupAccountTransactionsReplyPacket.HistoryDataBlock();
+            History.Amount = 0;
+            History.Item = Utils.StringToBytes("");
+            History.Time = Utils.StringToBytes("");
+            History.Type = 0;
+            History.User = Utils.StringToBytes("");
+            GATRP.HistoryData[0] = History;
+            OutPacket(GATRP, ThrottleOutPacketType.Task);
+        }
+
         /// <summary>
         ///  Send the region heightmap to the client
         /// </summary>
@@ -1258,6 +1465,8 @@ namespace OpenSim.Region.ClientStack.LindenUDP
 
         public void SendKillObject(ulong regionHandle, uint localID)
         {
+//            m_log.DebugFormat("[CLIENT]: Sending KillObjectPacket to {0} for {1} in {2}", Name, localID, regionHandle);
+            
             KillObjectPacket kill = (KillObjectPacket)PacketPool.Instance.GetPacket(PacketType.KillObject);
             // TODO: don't create new blocks if recycling an old packet
             kill.ObjectData = new KillObjectPacket.ObjectDataBlock[1];
@@ -3265,6 +3474,13 @@ namespace OpenSim.Region.ClientStack.LindenUDP
 
         public void SendPrimitiveToClient(SendPrimitiveData data)
         {
+//            string text = data.text;
+//            if (text.IndexOf("\n") >= 0)
+//                text = text.Remove(text.IndexOf("\n"));
+//            m_log.DebugFormat(
+//                "[CLIENT]: Placing request to send full info about prim {0} text {1} to client {2}", 
+//                data.localID, text, Name);
+            
             if (data.priority == double.NaN)
             {
                 m_log.Error("[LLClientView] SendPrimitiveToClient received a NaN priority, dropping update");
@@ -3302,7 +3518,16 @@ namespace OpenSim.Region.ClientStack.LindenUDP
 
                 outPacket.ObjectData = new ObjectUpdatePacket.ObjectDataBlock[count];
                 for (int i = 0; i < count; i++)
+                {
                     outPacket.ObjectData[i] = m_primFullUpdates.Dequeue();
+
+//                    string text = Util.FieldToString(outPacket.ObjectData[i].Text);
+//                    if (text.IndexOf("\n") >= 0)
+//                        text = text.Remove(text.IndexOf("\n"));
+//                    m_log.DebugFormat(
+//                        "[CLIENT]: Sending full info about prim {0} text {1} to client {2}", 
+//                        outPacket.ObjectData[i].ID, text, Name);
+                }
             }
 
             OutPacket(outPacket, ThrottleOutPacketType.State);
@@ -3705,7 +3930,8 @@ namespace OpenSim.Region.ClientStack.LindenUDP
             return false;
         }
 
-        public void SendEstateManagersList(UUID invoice, UUID[] EstateManagers, uint estateID)
+        public void SendEstateList(UUID invoice, int code, UUID[] Data, uint estateID)
+
         {
             EstateOwnerMessagePacket packet = new EstateOwnerMessagePacket();
             packet.AgentData.TransactionID = UUID.Random();
@@ -3714,26 +3940,36 @@ namespace OpenSim.Region.ClientStack.LindenUDP
             packet.MethodData.Invoice = invoice;
             packet.MethodData.Method = Utils.StringToBytes("setaccess");
 
-            EstateOwnerMessagePacket.ParamListBlock[] returnblock = new EstateOwnerMessagePacket.ParamListBlock[6 + EstateManagers.Length];
+            EstateOwnerMessagePacket.ParamListBlock[] returnblock = new EstateOwnerMessagePacket.ParamListBlock[6 + Data.Length];
 
-            for (int i = 0; i < (6 + EstateManagers.Length); i++)
+            for (int i = 0; i < (6 + Data.Length); i++)
             {
                 returnblock[i] = new EstateOwnerMessagePacket.ParamListBlock();
             }
             int j = 0;
 
             returnblock[j].Parameter = Utils.StringToBytes(estateID.ToString()); j++;
-            returnblock[j].Parameter = Utils.StringToBytes(((int)Constants.EstateAccessCodex.EstateManagers).ToString()); j++;
+            returnblock[j].Parameter = Utils.StringToBytes(code.ToString()); j++;
             returnblock[j].Parameter = Utils.StringToBytes("0"); j++;
             returnblock[j].Parameter = Utils.StringToBytes("0"); j++;
             returnblock[j].Parameter = Utils.StringToBytes("0"); j++;
-            returnblock[j].Parameter = Utils.StringToBytes(EstateManagers.Length.ToString()); j++;
-            for (int i = 0; i < EstateManagers.Length; i++)
+            returnblock[j].Parameter = Utils.StringToBytes("0"); j++;
+
+            j = 2; // Agents
+            if ((code & 2) != 0)
+                j = 3; // Groups
+            if ((code & 8) != 0)
+                j = 5; // Managers
+
+            returnblock[j].Parameter = Utils.StringToBytes(Data.Length.ToString());
+            j = 6;
+
+            for (int i = 0; i < Data.Length; i++)
             {
-                returnblock[j].Parameter = EstateManagers[i].GetBytes(); j++;
+                returnblock[j].Parameter = Data[i].GetBytes(); j++;
             }
             packet.ParamList = returnblock;
-            packet.Header.Reliable = false;
+            packet.Header.Reliable = true;
             OutPacket(packet, ThrottleOutPacketType.Task);
         }
 
@@ -4554,6 +4790,25 @@ namespace OpenSim.Region.ClientStack.LindenUDP
             AddLocalPacketHandler(PacketType.AvatarInterestsUpdate, HandleAvatarInterestsUpdate);
             AddLocalPacketHandler(PacketType.GrantUserRights, HandleGrantUserRights);
             AddLocalPacketHandler(PacketType.PlacesQuery, HandlePlacesQuery);
+            AddLocalPacketHandler(PacketType.UpdateMuteListEntry, HandleUpdateMuteListEntry);
+            AddLocalPacketHandler(PacketType.RemoveMuteListEntry, HandleRemoveMuteListEntry);
+            AddLocalPacketHandler(PacketType.UserReport, HandleUserReport);
+            AddLocalPacketHandler(PacketType.FindAgent, HandleFindAgent);
+            AddLocalPacketHandler(PacketType.TrackAgent, HandleTrackAgent);
+            AddLocalPacketHandler(PacketType.GodUpdateRegionInfo, HandleGodUpdateRegionInfoUpdate);
+            AddLocalPacketHandler(PacketType.GodlikeMessage, HandleGodlikeMessage);
+            AddLocalPacketHandler(PacketType.StateSave, HandleSaveStatePacket);
+            AddLocalPacketHandler(PacketType.GroupAccountDetailsRequest, HandleGroupAccountDetailsRequest);
+            AddLocalPacketHandler(PacketType.GroupAccountSummaryRequest, HandleGroupAccountSummaryRequest);
+            AddLocalPacketHandler(PacketType.GroupAccountTransactionsRequest, HandleGroupTransactionsDetailsRequest);
+            AddLocalPacketHandler(PacketType.FreezeUser, HandleFreezeUser);
+            AddLocalPacketHandler(PacketType.EjectUser, HandleEjectUser);
+            AddLocalPacketHandler(PacketType.ParcelBuyPass, HandleParcelBuyPass);
+            AddLocalPacketHandler(PacketType.ParcelGodMarkAsContent, HandleParcelGodMarkAsContent);
+            AddLocalPacketHandler(PacketType.GroupActiveProposalsRequest, HandleGroupActiveProposalsRequest);
+            AddLocalPacketHandler(PacketType.GroupVoteHistoryRequest, HandleGroupVoteHistoryRequest);
+            AddLocalPacketHandler(PacketType.SimWideDeletes, HandleSimWideDeletes);
+            AddLocalPacketHandler(PacketType.SendPostcard, HandleSendPostcard);
         }
 
         #region Packet Handlers
@@ -4649,7 +4904,72 @@ namespace OpenSim.Region.ClientStack.LindenUDP
 
             return false;
         }
-
+        
+        private bool HandleParcelGodMarkAsContent(IClientAPI client, Packet Packet)
+        {
+            ParcelGodMarkAsContentPacket ParcelGodMarkAsContent =
+                (ParcelGodMarkAsContentPacket)Packet;
+            
+            ParcelGodMark ParcelGodMarkAsContentHandler = OnParcelGodMark;
+            if (ParcelGodMarkAsContentHandler != null)
+            {
+                ParcelGodMarkAsContentHandler(this,
+                                 ParcelGodMarkAsContent.AgentData.AgentID,
+                                 ParcelGodMarkAsContent.ParcelData.LocalID);
+                return true;
+            }
+            return false;
+        }
+        
+        private bool HandleFreezeUser(IClientAPI client, Packet Packet)
+        {
+            FreezeUserPacket FreezeUser = (FreezeUserPacket)Packet;
+            
+            FreezeUserUpdate FreezeUserHandler = OnParcelFreezeUser;
+            if (FreezeUserHandler != null)
+            {
+                FreezeUserHandler(this,
+                                  FreezeUser.AgentData.AgentID,
+                                  FreezeUser.Data.Flags,
+                                  FreezeUser.Data.TargetID);
+                return true;
+            }
+            return false;
+        }
+        
+        private bool HandleEjectUser(IClientAPI client, Packet Packet)
+        {
+            EjectUserPacket EjectUser =
+                (EjectUserPacket)Packet;
+            
+            EjectUserUpdate EjectUserHandler = OnParcelEjectUser;
+            if (EjectUserHandler != null)
+            {
+                EjectUserHandler(this,
+                                 EjectUser.AgentData.AgentID,
+                                 EjectUser.Data.Flags,
+                                 EjectUser.Data.TargetID);
+                return true;
+            }
+            return false;
+        }
+        
+        private bool HandleParcelBuyPass(IClientAPI client, Packet Packet)
+        {
+            ParcelBuyPassPacket ParcelBuyPass =
+                (ParcelBuyPassPacket)Packet;
+            
+            ParcelBuyPass ParcelBuyPassHandler = OnParcelBuyPass;
+            if (ParcelBuyPassHandler != null)
+            {
+                ParcelBuyPassHandler(this,
+                                 ParcelBuyPass.AgentData.AgentID,
+                                 ParcelBuyPass.ParcelData.LocalID);
+                return true;
+            }
+            return false;
+        }
+        
         private bool HandleParcelBuyRequest(IClientAPI sender, Packet Pack)
         {
             ParcelBuyPacket parcel = (ParcelBuyPacket)Pack;
@@ -4857,6 +5177,9 @@ namespace OpenSim.Region.ClientStack.LindenUDP
                 UserProfile.FirstLifeImage = Properties.FLImageID;
                 UserProfile.Image = Properties.ImageID;
                 UserProfile.ProfileUrl = Utils.BytesToString(Properties.ProfileURL);
+                UserProfile.UserFlags &= ~3;
+                UserProfile.UserFlags |= Properties.AllowPublish ? 1 : 0;
+                UserProfile.UserFlags |= Properties.MaturePublish ? 2 : 0;
 
                 handlerUpdateAvatarProperties(this, UserProfile);
             }
@@ -4867,6 +5190,8 @@ namespace OpenSim.Region.ClientStack.LindenUDP
         {
             ScriptDialogReplyPacket rdialog = (ScriptDialogReplyPacket)Pack;
 
+            //m_log.DebugFormat("[CLIENT]: Received ScriptDialogReply from {0}", rdialog.Data.ObjectID);
+            
             #region Packet Session and User Check
             if (m_checkPackets)
             {
@@ -4887,7 +5212,7 @@ namespace OpenSim.Region.ClientStack.LindenUDP
                 args.Type = ChatTypeEnum.Shout;
                 args.Position = new Vector3();
                 args.Scene = Scene;
-                args.Sender = this;
+                args.Sender = this;                
                 ChatMessage handlerChatFromClient2 = OnChatFromClient;
                 if (handlerChatFromClient2 != null)
                     handlerChatFromClient2(this, args);
@@ -5012,7 +5337,37 @@ namespace OpenSim.Region.ClientStack.LindenUDP
             }
             return true;
         }
-
+        
+        private bool HandleFindAgent(IClientAPI client, Packet Packet)
+        {
+            FindAgentPacket FindAgent =
+                (FindAgentPacket)Packet;
+            
+            FindAgentUpdate FindAgentHandler = OnFindAgent;
+            if (FindAgentHandler != null)
+            {
+                FindAgentHandler(this,FindAgent.AgentBlock.Hunter,FindAgent.AgentBlock.Prey);
+                return true;
+            }
+            return false;
+        }
+        
+        private bool HandleTrackAgent(IClientAPI client, Packet Packet)
+        {
+            TrackAgentPacket TrackAgent =
+                (TrackAgentPacket)Packet;
+            
+            TrackAgentUpdate TrackAgentHandler = OnTrackAgent;
+            if (TrackAgentHandler != null)
+            {
+                TrackAgentHandler(this,
+                                  TrackAgent.AgentData.AgentID,
+                                  TrackAgent.TargetData.PreyID);
+                return true;
+            }
+            return false;
+        }
+        
         private bool HandlerRezObject(IClientAPI sender, Packet Pack)
         {
             RezObjectPacket rezPacket = (RezObjectPacket)Pack;
@@ -5595,7 +5950,7 @@ namespace OpenSim.Region.ClientStack.LindenUDP
 
             if (avSetStartLocationRequestPacket.AgentData.AgentID == AgentId && avSetStartLocationRequestPacket.AgentData.SessionID == SessionId)
             {
-                // Linden Client limitation..     
+                // Linden Client limitation..
                 if (avSetStartLocationRequestPacket.StartLocationData.LocationPos.X == 255.5f
                     || avSetStartLocationRequestPacket.StartLocationData.LocationPos.Y == 255.5f)
                 {
@@ -8282,6 +8637,70 @@ namespace OpenSim.Region.ClientStack.LindenUDP
 
             return true;
         }
+        
+        private bool HandleGodUpdateRegionInfoUpdate(IClientAPI client, Packet Packet)
+        {
+            GodUpdateRegionInfoPacket GodUpdateRegionInfo =
+                (GodUpdateRegionInfoPacket)Packet;
+
+            GodUpdateRegionInfoUpdate handlerGodUpdateRegionInfo = OnGodUpdateRegionInfoUpdate;
+            if (handlerGodUpdateRegionInfo != null)
+            {
+                handlerGodUpdateRegionInfo(this,
+                                           GodUpdateRegionInfo.RegionInfo.BillableFactor,
+                                           GodUpdateRegionInfo.RegionInfo.EstateID,
+                                           GodUpdateRegionInfo.RegionInfo.RegionFlags,
+                                           GodUpdateRegionInfo.RegionInfo.SimName,
+                                           GodUpdateRegionInfo.RegionInfo.RedirectGridX,
+                                           GodUpdateRegionInfo.RegionInfo.RedirectGridY);
+                return true;
+            }
+            return false;
+        }
+        
+        private bool HandleSimWideDeletes(IClientAPI client, Packet Packet)
+        {
+            SimWideDeletesPacket SimWideDeletesRequest =
+                (SimWideDeletesPacket)Packet;
+            SimWideDeletesDelegate handlerSimWideDeletesRequest = OnSimWideDeletes;
+            if (handlerSimWideDeletesRequest != null)
+            {
+                handlerSimWideDeletesRequest(this, SimWideDeletesRequest.AgentData.AgentID,(int)SimWideDeletesRequest.DataBlock.Flags,SimWideDeletesRequest.DataBlock.TargetID);
+                return true;
+            }
+            return false;
+        }
+        
+        private bool HandleGodlikeMessage(IClientAPI client, Packet Packet)
+        {
+            GodlikeMessagePacket GodlikeMessage =
+                (GodlikeMessagePacket)Packet;
+
+            GodlikeMessage handlerGodlikeMessage = onGodlikeMessage;
+            if (handlerGodlikeMessage != null)
+            {
+                handlerGodlikeMessage(this,
+                                      GodlikeMessage.MethodData.Invoice,
+                                      GodlikeMessage.MethodData.Method,
+                                      GodlikeMessage.ParamList[0].Parameter);
+                return true;
+            }
+            return false;
+        }
+        
+        private bool HandleSaveStatePacket(IClientAPI client, Packet Packet)
+        {
+            StateSavePacket SaveStateMessage =
+                (StateSavePacket)Packet;
+            SaveStateHandler handlerSaveStatePacket = OnSaveState;
+            if (handlerSaveStatePacket != null)
+            {
+                handlerSaveStatePacket(this,SaveStateMessage.AgentData.AgentID);
+                return true;
+            }
+            return false;
+        }
+        
         private bool HandleGodKickUser(IClientAPI sender, Packet Pack)
         {
             GodKickUserPacket gkupack = (GodKickUserPacket)Pack;
@@ -8632,6 +9051,76 @@ namespace OpenSim.Region.ClientStack.LindenUDP
             }
             return true;
         }
+        
+        private bool HandleUpdateMuteListEntry(IClientAPI client, Packet Packet)
+        {
+            UpdateMuteListEntryPacket UpdateMuteListEntry =
+                (UpdateMuteListEntryPacket)Packet;
+            MuteListEntryUpdate handlerUpdateMuteListEntry = OnUpdateMuteListEntry;
+            if (handlerUpdateMuteListEntry != null)
+            {
+                handlerUpdateMuteListEntry(this, UpdateMuteListEntry.MuteData.MuteID,
+                                           Utils.BytesToString(UpdateMuteListEntry.MuteData.MuteName),
+                                           UpdateMuteListEntry.MuteData.MuteType,
+                                           UpdateMuteListEntry.AgentData.AgentID);
+                return true;
+            }
+            return false;
+        }
+        
+        private bool HandleRemoveMuteListEntry(IClientAPI client, Packet Packet)
+        {
+            RemoveMuteListEntryPacket RemoveMuteListEntry =
+                (RemoveMuteListEntryPacket)Packet;
+            MuteListEntryRemove handlerRemoveMuteListEntry = OnRemoveMuteListEntry;
+            if (handlerRemoveMuteListEntry != null)
+            {
+                handlerRemoveMuteListEntry(this,
+                                           RemoveMuteListEntry.MuteData.MuteID,
+                                           Utils.BytesToString(RemoveMuteListEntry.MuteData.MuteName),
+                                           RemoveMuteListEntry.AgentData.AgentID);
+                return true;
+            }
+            return false;
+        }
+        
+        private bool HandleUserReport(IClientAPI client, Packet Packet)
+        {
+            UserReportPacket UserReport =
+                (UserReportPacket)Packet;
+
+            NewUserReport handlerUserReport = OnUserReport;
+            if (handlerUserReport != null)
+            {
+                handlerUserReport(this,
+                    Utils.BytesToString(UserReport.ReportData.AbuseRegionName),
+                    UserReport.ReportData.AbuserID,
+                    UserReport.ReportData.Category,
+                    UserReport.ReportData.CheckFlags,
+                    Utils.BytesToString(UserReport.ReportData.Details),
+                    UserReport.ReportData.ObjectID,
+                    UserReport.ReportData.Position,
+                    UserReport.ReportData.ReportType,
+                    UserReport.ReportData.ScreenshotID,
+                    Utils.BytesToString(UserReport.ReportData.Summary),
+                    UserReport.AgentData.AgentID);
+                return true;
+            }
+            return false;
+        }
+        
+        private bool HandleSendPostcard(IClientAPI client, Packet packet)
+        {
+//            SendPostcardPacket SendPostcard =
+//                (SendPostcardPacket)packet;
+            SendPostcard handlerSendPostcard = OnSendPostcard;
+            if (handlerSendPostcard != null)
+            {
+                handlerSendPostcard(this);
+                return true;
+            }
+            return false;
+        }
 
         private bool HandleUseCircuitCode(IClientAPI sender, Packet Pack)
         {
@@ -8901,7 +9390,72 @@ namespace OpenSim.Region.ClientStack.LindenUDP
             return true;
 
         }
-
+        
+        private bool HandleGroupVoteHistoryRequest(IClientAPI client, Packet Packet)
+        {
+            GroupVoteHistoryRequestPacket GroupVoteHistoryRequest =
+                (GroupVoteHistoryRequestPacket)Packet;
+            GroupVoteHistoryRequest handlerGroupVoteHistoryRequest = OnGroupVoteHistoryRequest;
+            if (handlerGroupVoteHistoryRequest != null)
+            {
+                handlerGroupVoteHistoryRequest(this, GroupVoteHistoryRequest.AgentData.AgentID,GroupVoteHistoryRequest.AgentData.SessionID,GroupVoteHistoryRequest.GroupData.GroupID,GroupVoteHistoryRequest.TransactionData.TransactionID);
+                return true;
+            }
+            return false;
+        }
+        
+        private bool HandleGroupActiveProposalsRequest(IClientAPI client, Packet Packet)
+        {
+            GroupActiveProposalsRequestPacket GroupActiveProposalsRequest =
+                (GroupActiveProposalsRequestPacket)Packet;
+            GroupActiveProposalsRequest handlerGroupActiveProposalsRequest = OnGroupActiveProposalsRequest;
+            if (handlerGroupActiveProposalsRequest != null)
+            {
+                handlerGroupActiveProposalsRequest(this, GroupActiveProposalsRequest.AgentData.AgentID,GroupActiveProposalsRequest.AgentData.SessionID,GroupActiveProposalsRequest.GroupData.GroupID,GroupActiveProposalsRequest.TransactionData.TransactionID);
+                return true;
+            }
+            return false;
+        }
+        
+        private bool HandleGroupAccountDetailsRequest(IClientAPI client, Packet Packet)
+        {
+            GroupAccountDetailsRequestPacket GroupAccountDetailsRequest =
+                (GroupAccountDetailsRequestPacket)Packet;
+            GroupAccountDetailsRequest handlerGroupAccountDetailsRequest = OnGroupAccountDetailsRequest;
+            if (handlerGroupAccountDetailsRequest != null)
+            {
+                handlerGroupAccountDetailsRequest(this, GroupAccountDetailsRequest.AgentData.AgentID,GroupAccountDetailsRequest.AgentData.GroupID,GroupAccountDetailsRequest.MoneyData.RequestID,GroupAccountDetailsRequest.AgentData.SessionID);
+                return true;
+            }
+            return false;
+        }
+        
+        private bool HandleGroupAccountSummaryRequest(IClientAPI client, Packet Packet)
+        {
+            GroupAccountSummaryRequestPacket GroupAccountSummaryRequest =
+                (GroupAccountSummaryRequestPacket)Packet;
+            GroupAccountSummaryRequest handlerGroupAccountSummaryRequest = OnGroupAccountSummaryRequest;
+            if (handlerGroupAccountSummaryRequest != null)
+            {
+                handlerGroupAccountSummaryRequest(this, GroupAccountSummaryRequest.AgentData.AgentID,GroupAccountSummaryRequest.AgentData.GroupID);
+                return true;
+            }
+            return false;
+        }
+        
+        private bool HandleGroupTransactionsDetailsRequest(IClientAPI client, Packet Packet)
+        {
+            GroupAccountTransactionsRequestPacket GroupAccountTransactionsRequest =
+                (GroupAccountTransactionsRequestPacket)Packet;
+            GroupAccountTransactionsRequest handlerGroupAccountTransactionsRequest = OnGroupAccountTransactionsRequest;
+            if (handlerGroupAccountTransactionsRequest != null)
+            {
+                handlerGroupAccountTransactionsRequest(this, GroupAccountTransactionsRequest.AgentData.AgentID,GroupAccountTransactionsRequest.AgentData.GroupID,GroupAccountTransactionsRequest.MoneyData.RequestID,GroupAccountTransactionsRequest.AgentData.SessionID);
+                return true;
+            }
+            return false;
+        }
+        
         private bool HandleGroupTitlesRequest(IClientAPI sender, Packet Pack)
         {
             GroupTitlesRequestPacket groupTitlesRequest =
@@ -13702,7 +14256,7 @@ namespace OpenSim.Region.ClientStack.LindenUDP
                         if (handlerGodKickUser != null)
                         {
                             handlerGodKickUser(gkupack.UserInfo.GodID, gkupack.UserInfo.GodSessionID,
-                        	                   gkupack.UserInfo.AgentID, gkupack.UserInfo.KickFlags, gkupack.UserInfo.Reason,gkupack.UserInfo);
+                                               gkupack.UserInfo.AgentID, gkupack.UserInfo.KickFlags, gkupack.UserInfo.Reason,gkupack.UserInfo);
                         }
                     }
                     else
@@ -15808,6 +16362,23 @@ namespace OpenSim.Region.ClientStack.LindenUDP
             osdEvent.Add("body", eventBody);
 
             return osdEvent;
+        }
+
+        public void SendAvatarInterestsReply(UUID avatarID, uint wantMask, string wantText, uint skillsMask, string skillsText, string languages)
+        {
+            AvatarInterestsReplyPacket packet = (AvatarInterestsReplyPacket)PacketPool.Instance.GetPacket(PacketType.AvatarInterestsReply);
+
+            packet.AgentData = new AvatarInterestsReplyPacket.AgentDataBlock();
+            packet.AgentData.AgentID = AgentId;
+            packet.AgentData.AvatarID = avatarID;
+
+            packet.PropertiesData = new AvatarInterestsReplyPacket.PropertiesDataBlock();
+            packet.PropertiesData.WantToMask = wantMask;
+            packet.PropertiesData.WantToText = Utils.StringToBytes(wantText);
+            packet.PropertiesData.SkillsMask = skillsMask;
+            packet.PropertiesData.SkillsText = Utils.StringToBytes(skillsText);
+            packet.PropertiesData.LanguagesText = Utils.StringToBytes(languages);
+            OutPacket(packet, ThrottleOutPacketType.Task);
         }
     }
 }

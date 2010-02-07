@@ -287,6 +287,26 @@ namespace OpenSim.Tests.Common.Mock
         public event AvatarInterestUpdate OnAvatarInterestUpdate;
 
         public event PlacesQuery OnPlacesQuery;
+        
+        public event FindAgentUpdate OnFindAgent;
+        public event TrackAgentUpdate OnTrackAgent;
+        public event NewUserReport OnUserReport;
+        public event SaveStateHandler OnSaveState;
+        public event GroupAccountSummaryRequest OnGroupAccountSummaryRequest;
+        public event GroupAccountDetailsRequest OnGroupAccountDetailsRequest;
+        public event GroupAccountTransactionsRequest OnGroupAccountTransactionsRequest;
+        public event FreezeUserUpdate OnParcelFreezeUser;
+        public event EjectUserUpdate OnParcelEjectUser;
+        public event ParcelBuyPass OnParcelBuyPass;
+        public event ParcelGodMark OnParcelGodMark;
+        public event GroupActiveProposalsRequest OnGroupActiveProposalsRequest;
+        public event GroupVoteHistoryRequest OnGroupVoteHistoryRequest;
+        public event SimWideDeletesDelegate OnSimWideDeletes;
+        public event SendPostcard OnSendPostcard;
+        public event MuteListEntryUpdate OnUpdateMuteListEntry;
+        public event MuteListEntryRemove OnRemoveMuteListEntry;
+        public event GodlikeMessage onGodlikeMessage;
+        public event GodUpdateRegionInfoUpdate OnGodUpdateRegionInfoUpdate;
 
 #pragma warning restore 67
 
@@ -904,7 +924,7 @@ namespace OpenSim.Tests.Common.Mock
         {
         }
 
-        public void SendEstateManagersList(UUID invoice, UUID[] EstateManagers, uint estateID)
+        public void SendEstateList(UUID invoice, int code, UUID[] Data, uint estateID)
         {
         }
 
@@ -1159,6 +1179,29 @@ namespace OpenSim.Tests.Common.Mock
         public void SendRebakeAvatarTextures(UUID textureID)
         {
         }
+        
+        public void SendAvatarInterestsReply(UUID avatarID, uint wantMask, string wantText, uint skillsMask, string skillsText, string languages)
+        {
+        }
+        
+        public void SendGroupAccountingDetails(IClientAPI sender,UUID groupID, UUID transactionID, UUID sessionID, int amt)
+        {
+        }
+        
+        public void SendGroupAccountingSummary(IClientAPI sender,UUID groupID, uint moneyAmt, int totalTier, int usedTier)
+        {
+        }
+        
+        public void SendGroupTransactionsSummaryDetails(IClientAPI sender,UUID groupID, UUID transactionID, UUID sessionID,int amt)
+        {
+        }
 
+        public void SendGroupVoteHistory(UUID groupID, UUID transactionID, GroupVoteHistory[] Votes)
+        {
+        }
+
+        public void SendGroupActiveProposals(UUID groupID, UUID transactionID, GroupActiveProposals[] Proposals)
+        {
+        }
     }
 }

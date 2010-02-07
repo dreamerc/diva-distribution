@@ -591,7 +591,7 @@ namespace OpenSim.Region.ScriptEngine.XEngine
 
             Dictionary<KeyValuePair<int, int>, KeyValuePair<int, int>> linemap;
 
-            lock(m_ScriptErrors)
+            lock (m_ScriptErrors)
             {
                 try
                 {
@@ -806,12 +806,6 @@ namespace OpenSim.Region.ScriptEngine.XEngine
                 instance.ClearQueue();
                 instance.Stop(0);
 
-                SceneObjectPart part =
-                    m_Scene.GetSceneObjectPart(localID);
-
-                if (part != null)
-                    part.RemoveScriptEvents(itemID);
-
 //                bool objectRemoved = false;
 
                 lock (m_PrimObjects)
@@ -846,7 +840,10 @@ namespace OpenSim.Region.ScriptEngine.XEngine
 
                 ObjectRemoved handlerObjectRemoved = OnObjectRemoved;
                 if (handlerObjectRemoved != null)
+                {
+                    SceneObjectPart part = m_Scene.GetSceneObjectPart(localID);                    
                     handlerObjectRemoved(part.UUID);
+                }
 
                 CleanAssemblies();
             }

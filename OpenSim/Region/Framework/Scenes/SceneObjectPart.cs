@@ -90,11 +90,37 @@ namespace OpenSim.Region.Framework.Scenes
         SCALE = 0x40
     }
 
+    public enum PrimType : int
+    {
+        BOX = 0,
+        CYLINDER = 1,
+        PRISM = 2,
+        SPHERE = 3,
+        TORUS = 4,
+        TUBE = 5,
+        RING = 6,
+        SCULPT = 7
+    }
+
     #endregion Enumerations
 
     public class SceneObjectPart : IScriptHost
     {
+        /// <value>
+        /// Denote all sides of the prim
+        /// </value>
+        public const int ALL_SIDES = -1;
+        
         private static readonly ILog m_log = LogManager.GetLogger(MethodBase.GetCurrentMethod().DeclaringType);
+
+        /// <value>
+        /// Is this sop a root part?
+        /// </value>
+        [XmlIgnore]
+        public bool IsRoot 
+        {
+           get { return ParentGroup.RootPart == this; } 
+        }
 
         // use only one serializer to give the runtime a chance to optimize it (it won't do that if you
         // use a new instance every time)
@@ -140,6 +166,18 @@ namespace OpenSim.Region.Framework.Scenes
 
         [XmlIgnore]
         public UUID FromItemID;
+
+        [XmlIgnore]
+        public int STATUS_ROTATE_X;
+
+        [XmlIgnore]
+        public int STATUS_ROTATE_Y;
+
+        [XmlIgnore]
+        public int STATUS_ROTATE_Z;
+        
+        [XmlIgnore]
+        private Dictionary<int, string> m_CollisionFilter = new Dictionary<int, string>();
                
         /// <value>
         /// The UUID of the user inventory item from which this object was rezzed if this is a root part.
@@ -452,6 +490,17 @@ namespace OpenSim.Region.Framework.Scenes
             }
         }
 
+        
+        [XmlIgnore]
+        public Dictionary<int, string> CollisionFilter
+        {
+            get { return m_CollisionFilter; }
+            set
+            {
+                m_CollisionFilter = value;
+            }
+        }
+
         public ulong RegionHandle
         {
             get { return m_regionHandle; }
@@ -714,6 +763,9 @@ namespace OpenSim.Region.Framework.Scenes
             }
         }
 
+        /// <value>
+        /// Text color.
+        /// </value>
         public Color Color
         {
             get { return m_color; }
@@ -1659,6 +1711,19 @@ namespace OpenSim.Region.Framework.Scenes
             return m_parentGroup.RootPart.DIE_AT_EDGE;
         }
 
+        public int GetAxisRotation(int axis)
+        {
+            //Cannot use ScriptBaseClass constants as no referance to it currently.
+            if (axis == 2)//STATUS_ROTATE_X
+                return STATUS_ROTATE_X;
+            if (axis == 4)//STATUS_ROTATE_Y
+                return STATUS_ROTATE_Y;
+            if (axis == 8)//STATUS_ROTATE_Z
+                return STATUS_ROTATE_Z;
+
+            return 0;
+        }
+
         public double GetDistanceTo(Vector3 a, Vector3 b)
         {
             float dx = a.X - b.X;
@@ -1817,16 +1882,12 @@ namespace OpenSim.Region.Framework.Scenes
             // and build up list of colliders this time
             foreach (uint localid in collissionswith.Keys)
             {
-                if (localid != 0)
+                thisHitColliders.Add(localid);
+                if (!m_lastColliders.Contains(localid))
                 {
-                    thisHitColliders.Add(localid);
-                    if (!m_lastColliders.Contains(localid))
-                    {
-                        startedColliders.Add(localid);
-                    }
-
-                    //m_log.Debug("[OBJECT]: Collided with:" + localid.ToString() + " at depth of: " + collissionswith[localid].ToString());
+                    startedColliders.Add(localid);
                 }
+                //m_log.Debug("[OBJECT]: Collided with:" + localid.ToString() + " at depth of: " + collissionswith[localid].ToString());
             }
 
             // calculate things that ended colliding
@@ -1868,6 +1929,8 @@ namespace OpenSim.Region.Framework.Scenes
                     List<DetectedObject> colliding = new List<DetectedObject>();
                     foreach (uint localId in startedColliders)
                     {
+                        if (localId == 0)
+                            continue;
                         // always running this check because if the user deletes the object it would return a null reference.
                         if (m_parentGroup == null)
                             return;
@@ -1876,18 +1939,49 @@ namespace OpenSim.Region.Framework.Scenes
                             return;
                         
                         SceneObjectPart obj = m_parentGroup.Scene.GetSceneObjectPart(localId);
+                        string data = "";
                         if (obj != null)
                         {
-                            DetectedObject detobj = new DetectedObject();
-                            detobj.keyUUID = obj.UUID;
-                            detobj.nameStr = obj.Name;
-                            detobj.ownerUUID = obj._ownerID;
-                            detobj.posVector = obj.AbsolutePosition;
-                            detobj.rotQuat = obj.GetWorldRotation();
-                            detobj.velVector = obj.Velocity;
-                            detobj.colliderType = 0;
-                            detobj.groupUUID = obj._groupID;
-                            colliding.Add(detobj);
+                            if (m_parentGroup.RootPart.CollisionFilter.ContainsValue(obj.UUID.ToString()) || m_parentGroup.RootPart.CollisionFilter.ContainsValue(obj.Name))
+                            {
+                                bool found = m_parentGroup.RootPart.CollisionFilter.TryGetValue(1,out data);
+                                //If it is 1, it is to accept ONLY collisions from this object
+                                if (found)
+                                {
+                                    DetectedObject detobj = new DetectedObject();
+                                    detobj.keyUUID = obj.UUID;
+                                    detobj.nameStr = obj.Name;
+                                    detobj.ownerUUID = obj._ownerID;
+                                    detobj.posVector = obj.AbsolutePosition;
+                                    detobj.rotQuat = obj.GetWorldRotation();
+                                    detobj.velVector = obj.Velocity;
+                                    detobj.colliderType = 0;
+                                    detobj.groupUUID = obj._groupID;
+                                    colliding.Add(detobj);
+                                }
+                                //If it is 0, it is to not accept collisions from this object
+                                else
+                                {
+                                }
+                            }
+                            else
+                            {
+                                bool found = m_parentGroup.RootPart.CollisionFilter.TryGetValue(1,out data);
+                                //If it is 1, it is to accept ONLY collisions from this object, so this other object will not work
+                                if (!found)
+                                {
+                                    DetectedObject detobj = new DetectedObject();
+                                    detobj.keyUUID = obj.UUID;
+                                    detobj.nameStr = obj.Name;
+                                    detobj.ownerUUID = obj._ownerID;
+                                    detobj.posVector = obj.AbsolutePosition;
+                                    detobj.rotQuat = obj.GetWorldRotation();
+                                    detobj.velVector = obj.Velocity;
+                                    detobj.colliderType = 0;
+                                    detobj.groupUUID = obj._groupID;
+                                    colliding.Add(detobj);
+                                }
+                            }
                         }
                         else
                         {
@@ -1899,16 +1993,47 @@ namespace OpenSim.Region.Framework.Scenes
 
                                 if (av.LocalId == localId)
                                 {
-                                    DetectedObject detobj = new DetectedObject();
-                                    detobj.keyUUID = av.UUID;
-                                    detobj.nameStr = av.ControllingClient.Name;
-                                    detobj.ownerUUID = av.UUID;
-                                    detobj.posVector = av.AbsolutePosition;
-                                    detobj.rotQuat = av.Rotation;
-                                    detobj.velVector = av.Velocity;
-                                    detobj.colliderType = 0;
-                                    detobj.groupUUID = av.ControllingClient.ActiveGroupId;
-                                    colliding.Add(detobj);
+                                    if (m_parentGroup.RootPart.CollisionFilter.ContainsValue(av.UUID.ToString()) || m_parentGroup.RootPart.CollisionFilter.ContainsValue(av.Name))
+                                    {
+                                        bool found = m_parentGroup.RootPart.CollisionFilter.TryGetValue(1,out data);
+                                        //If it is 1, it is to accept ONLY collisions from this avatar
+                                        if (found)
+                                        {
+                                            DetectedObject detobj = new DetectedObject();
+                                            detobj.keyUUID = av.UUID;
+                                            detobj.nameStr = av.ControllingClient.Name;
+                                            detobj.ownerUUID = av.UUID;
+                                            detobj.posVector = av.AbsolutePosition;
+                                            detobj.rotQuat = av.Rotation;
+                                            detobj.velVector = av.Velocity;
+                                            detobj.colliderType = 0;
+                                            detobj.groupUUID = av.ControllingClient.ActiveGroupId;
+                                            colliding.Add(detobj);
+                                        }
+                                        //If it is 0, it is to not accept collisions from this avatar
+                                        else
+                                        {
+                                        }
+                                    }
+                                    else
+                                    {
+                                        bool found = m_parentGroup.RootPart.CollisionFilter.TryGetValue(1,out data);
+                                        //If it is 1, it is to accept ONLY collisions from this avatar, so this other avatar will not work
+                                        if (!found)
+                                        {
+                                            DetectedObject detobj = new DetectedObject();
+                                            detobj.keyUUID = av.UUID;
+                                            detobj.nameStr = av.ControllingClient.Name;
+                                            detobj.ownerUUID = av.UUID;
+                                            detobj.posVector = av.AbsolutePosition;
+                                            detobj.rotQuat = av.Rotation;
+                                            detobj.velVector = av.Velocity;
+                                            detobj.colliderType = 0;
+                                            detobj.groupUUID = av.ControllingClient.ActiveGroupId;
+                                            colliding.Add(detobj);
+                                        }
+                                    }
+
                                 }
                             }
                         }
@@ -1922,7 +2047,10 @@ namespace OpenSim.Region.Framework.Scenes
                         
                         if (m_parentGroup.Scene == null)
                             return;
-                        
+                        if (m_parentGroup.PassCollision == true)
+                        {
+                            //TODO: Add pass to root prim!
+                        }
                         m_parentGroup.Scene.EventManager.TriggerScriptCollidingStart(LocalId, StartCollidingMessage);
                     }
                 }
@@ -1947,39 +2075,101 @@ namespace OpenSim.Region.Framework.Scenes
                             return;
                         
                         SceneObjectPart obj = m_parentGroup.Scene.GetSceneObjectPart(localId);
+                        string data = "";
                         if (obj != null)
                         {
-                            DetectedObject detobj = new DetectedObject();
-                            detobj.keyUUID = obj.UUID;
-                            detobj.nameStr = obj.Name;
-                            detobj.ownerUUID = obj._ownerID;
-                            detobj.posVector = obj.AbsolutePosition;
-                            detobj.rotQuat = obj.GetWorldRotation();
-                            detobj.velVector = obj.Velocity;
-                            detobj.colliderType = 0;
-                            detobj.groupUUID = obj._groupID;
-                            colliding.Add(detobj);
+                            if (m_parentGroup.RootPart.CollisionFilter.ContainsValue(obj.UUID.ToString()) || m_parentGroup.RootPart.CollisionFilter.ContainsValue(obj.Name))
+                            {
+                                bool found = m_parentGroup.RootPart.CollisionFilter.TryGetValue(1,out data);
+                                //If it is 1, it is to accept ONLY collisions from this object
+                                if (found)
+                                {
+                                    DetectedObject detobj = new DetectedObject();
+                                    detobj.keyUUID = obj.UUID;
+                                    detobj.nameStr = obj.Name;
+                                    detobj.ownerUUID = obj._ownerID;
+                                    detobj.posVector = obj.AbsolutePosition;
+                                    detobj.rotQuat = obj.GetWorldRotation();
+                                    detobj.velVector = obj.Velocity;
+                                    detobj.colliderType = 0;
+                                    detobj.groupUUID = obj._groupID;
+                                    colliding.Add(detobj);
+                                }
+                                //If it is 0, it is to not accept collisions from this object
+                                else
+                                {
+                                }
+                            }
+                            else
+                            {
+                                bool found = m_parentGroup.RootPart.CollisionFilter.TryGetValue(1,out data);
+                                //If it is 1, it is to accept ONLY collisions from this object, so this other object will not work
+                                if (!found)
+                                {
+                                    DetectedObject detobj = new DetectedObject();
+                                    detobj.keyUUID = obj.UUID;
+                                    detobj.nameStr = obj.Name;
+                                    detobj.ownerUUID = obj._ownerID;
+                                    detobj.posVector = obj.AbsolutePosition;
+                                    detobj.rotQuat = obj.GetWorldRotation();
+                                    detobj.velVector = obj.Velocity;
+                                    detobj.colliderType = 0;
+                                    detobj.groupUUID = obj._groupID;
+                                    colliding.Add(detobj);
+                                }
+                            }
                         }
                         else
                         {
                             ScenePresence[] avlist = m_parentGroup.Scene.GetScenePresences();
-                            
+
                             for (int i = 0; i < avlist.Length; i++)
                             {
                                 ScenePresence av = avlist[i];
 
                                 if (av.LocalId == localId)
                                 {
-                                    DetectedObject detobj = new DetectedObject();
-                                    detobj.keyUUID = av.UUID;
-                                    detobj.nameStr = av.Name;
-                                    detobj.ownerUUID = av.UUID;
-                                    detobj.posVector = av.AbsolutePosition;
-                                    detobj.rotQuat = av.Rotation;
-                                    detobj.velVector = av.Velocity;
-                                    detobj.colliderType = 0;
-                                    detobj.groupUUID = av.ControllingClient.ActiveGroupId;
-                                    colliding.Add(detobj);
+                                    if (m_parentGroup.RootPart.CollisionFilter.ContainsValue(av.UUID.ToString()) || m_parentGroup.RootPart.CollisionFilter.ContainsValue(av.Name))
+                                    {
+                                        bool found = m_parentGroup.RootPart.CollisionFilter.TryGetValue(1,out data);
+                                        //If it is 1, it is to accept ONLY collisions from this avatar
+                                        if (found)
+                                        {
+                                            DetectedObject detobj = new DetectedObject();
+                                            detobj.keyUUID = av.UUID;
+                                            detobj.nameStr = av.ControllingClient.Name;
+                                            detobj.ownerUUID = av.UUID;
+                                            detobj.posVector = av.AbsolutePosition;
+                                            detobj.rotQuat = av.Rotation;
+                                            detobj.velVector = av.Velocity;
+                                            detobj.colliderType = 0;
+                                            detobj.groupUUID = av.ControllingClient.ActiveGroupId;
+                                            colliding.Add(detobj);
+                                        }
+                                        //If it is 0, it is to not accept collisions from this avatar
+                                        else
+                                        {
+                                        }
+                                    }
+                                    else
+                                    {
+                                        bool found = m_parentGroup.RootPart.CollisionFilter.TryGetValue(1,out data);
+                                        //If it is 1, it is to accept ONLY collisions from this avatar, so this other avatar will not work
+                                        if (!found)
+                                        {
+                                            DetectedObject detobj = new DetectedObject();
+                                            detobj.keyUUID = av.UUID;
+                                            detobj.nameStr = av.ControllingClient.Name;
+                                            detobj.ownerUUID = av.UUID;
+                                            detobj.posVector = av.AbsolutePosition;
+                                            detobj.rotQuat = av.Rotation;
+                                            detobj.velVector = av.Velocity;
+                                            detobj.colliderType = 0;
+                                            detobj.groupUUID = av.ControllingClient.ActiveGroupId;
+                                            colliding.Add(detobj);
+                                        }
+                                    }
+
                                 }
                             }
                         }
@@ -2016,18 +2206,49 @@ namespace OpenSim.Region.Framework.Scenes
                         if (m_parentGroup.Scene == null)
                             return;
                         SceneObjectPart obj = m_parentGroup.Scene.GetSceneObjectPart(localId);
+                        string data = "";
                         if (obj != null)
                         {
-                            DetectedObject detobj = new DetectedObject();
-                            detobj.keyUUID = obj.UUID;
-                            detobj.nameStr = obj.Name;
-                            detobj.ownerUUID = obj._ownerID;
-                            detobj.posVector = obj.AbsolutePosition;
-                            detobj.rotQuat = obj.GetWorldRotation();
-                            detobj.velVector = obj.Velocity;
-                            detobj.colliderType = 0;
-                            detobj.groupUUID = obj._groupID;
-                            colliding.Add(detobj);
+                            if (m_parentGroup.RootPart.CollisionFilter.ContainsValue(obj.UUID.ToString()) || m_parentGroup.RootPart.CollisionFilter.ContainsValue(obj.Name))
+                            {
+                                bool found = m_parentGroup.RootPart.CollisionFilter.TryGetValue(1,out data);
+                                //If it is 1, it is to accept ONLY collisions from this object
+                                if (found)
+                                {
+                                    DetectedObject detobj = new DetectedObject();
+                                    detobj.keyUUID = obj.UUID;
+                                    detobj.nameStr = obj.Name;
+                                    detobj.ownerUUID = obj._ownerID;
+                                    detobj.posVector = obj.AbsolutePosition;
+                                    detobj.rotQuat = obj.GetWorldRotation();
+                                    detobj.velVector = obj.Velocity;
+                                    detobj.colliderType = 0;
+                                    detobj.groupUUID = obj._groupID;
+                                    colliding.Add(detobj);
+                                }
+                                //If it is 0, it is to not accept collisions from this object
+                                else
+                                {
+                                }
+                            }
+                            else
+                            {
+                                bool found = m_parentGroup.RootPart.CollisionFilter.TryGetValue(1,out data);
+                                //If it is 1, it is to accept ONLY collisions from this object, so this other object will not work
+                                if (!found)
+                                {
+                                    DetectedObject detobj = new DetectedObject();
+                                    detobj.keyUUID = obj.UUID;
+                                    detobj.nameStr = obj.Name;
+                                    detobj.ownerUUID = obj._ownerID;
+                                    detobj.posVector = obj.AbsolutePosition;
+                                    detobj.rotQuat = obj.GetWorldRotation();
+                                    detobj.velVector = obj.Velocity;
+                                    detobj.colliderType = 0;
+                                    detobj.groupUUID = obj._groupID;
+                                    colliding.Add(detobj);
+                                }
+                            }
                         }
                         else
                         {
@@ -2039,16 +2260,47 @@ namespace OpenSim.Region.Framework.Scenes
 
                                 if (av.LocalId == localId)
                                 {
-                                    DetectedObject detobj = new DetectedObject();
-                                    detobj.keyUUID = av.UUID;
-                                    detobj.nameStr = av.Name;
-                                    detobj.ownerUUID = av.UUID;
-                                    detobj.posVector = av.AbsolutePosition;
-                                    detobj.rotQuat = av.Rotation;
-                                    detobj.velVector = av.Velocity;
-                                    detobj.colliderType = 0;
-                                    detobj.groupUUID = av.ControllingClient.ActiveGroupId;
-                                    colliding.Add(detobj);
+                                    if (m_parentGroup.RootPart.CollisionFilter.ContainsValue(av.UUID.ToString()) || m_parentGroup.RootPart.CollisionFilter.ContainsValue(av.Name))
+                                    {
+                                        bool found = m_parentGroup.RootPart.CollisionFilter.TryGetValue(1,out data);
+                                        //If it is 1, it is to accept ONLY collisions from this avatar
+                                        if (found)
+                                        {
+                                            DetectedObject detobj = new DetectedObject();
+                                            detobj.keyUUID = av.UUID;
+                                            detobj.nameStr = av.ControllingClient.Name;
+                                            detobj.ownerUUID = av.UUID;
+                                            detobj.posVector = av.AbsolutePosition;
+                                            detobj.rotQuat = av.Rotation;
+                                            detobj.velVector = av.Velocity;
+                                            detobj.colliderType = 0;
+                                            detobj.groupUUID = av.ControllingClient.ActiveGroupId;
+                                            colliding.Add(detobj);
+                                        }
+                                        //If it is 0, it is to not accept collisions from this avatar
+                                        else
+                                        {
+                                        }
+                                    }
+                                    else
+                                    {
+                                        bool found = m_parentGroup.RootPart.CollisionFilter.TryGetValue(1,out data);
+                                        //If it is 1, it is to accept ONLY collisions from this avatar, so this other avatar will not work
+                                        if (!found)
+                                        {
+                                            DetectedObject detobj = new DetectedObject();
+                                            detobj.keyUUID = av.UUID;
+                                            detobj.nameStr = av.ControllingClient.Name;
+                                            detobj.ownerUUID = av.UUID;
+                                            detobj.posVector = av.AbsolutePosition;
+                                            detobj.rotQuat = av.Rotation;
+                                            detobj.velVector = av.Velocity;
+                                            detobj.colliderType = 0;
+                                            detobj.groupUUID = av.ControllingClient.ActiveGroupId;
+                                            colliding.Add(detobj);
+                                        }
+                                    }
+
                                 }
                             }
                         }
@@ -2065,6 +2317,120 @@ namespace OpenSim.Region.Framework.Scenes
                             return;
                         
                         m_parentGroup.Scene.EventManager.TriggerScriptCollidingEnd(LocalId, EndCollidingMessage);
+                    }
+                }
+            }
+            if ((m_parentGroup.RootPart.ScriptEvents & scriptEvents.land_collision_start) != 0)
+            {
+                if (startedColliders.Count > 0)
+                {
+                    ColliderArgs LandStartCollidingMessage = new ColliderArgs();
+                    List<DetectedObject> colliding = new List<DetectedObject>();
+                    foreach (uint localId in startedColliders)
+                    {
+                        if (localId == 0)
+                        {
+                            //Hope that all is left is ground!
+                            DetectedObject detobj = new DetectedObject();
+                            detobj.keyUUID = UUID.Zero;
+                            detobj.nameStr = "";
+                            detobj.ownerUUID = UUID.Zero;
+                            detobj.posVector = m_parentGroup.RootPart.AbsolutePosition;
+                            detobj.rotQuat = Quaternion.Identity;
+                            detobj.velVector = Vector3.Zero;
+                            detobj.colliderType = 0;
+                            detobj.groupUUID = UUID.Zero;
+                            colliding.Add(detobj);
+                        }
+                    }
+
+                    if (colliding.Count > 0)
+                    {
+                        LandStartCollidingMessage.Colliders = colliding;
+                        // always running this check because if the user deletes the object it would return a null reference.
+                        if (m_parentGroup == null)
+                            return;
+
+                        if (m_parentGroup.Scene == null)
+                            return;
+
+                        m_parentGroup.Scene.EventManager.TriggerScriptLandCollidingStart(LocalId, LandStartCollidingMessage);
+                    }
+                }
+            }
+            if ((m_parentGroup.RootPart.ScriptEvents & scriptEvents.land_collision) != 0)
+            {
+                if (m_lastColliders.Count > 0)
+                {
+                    ColliderArgs LandCollidingMessage = new ColliderArgs();
+                    List<DetectedObject> colliding = new List<DetectedObject>();
+                    foreach (uint localId in startedColliders)
+                    {
+                        if (localId == 0)
+                        {
+                            //Hope that all is left is ground!
+                            DetectedObject detobj = new DetectedObject();
+                            detobj.keyUUID = UUID.Zero;
+                            detobj.nameStr = "";
+                            detobj.ownerUUID = UUID.Zero;
+                            detobj.posVector = m_parentGroup.RootPart.AbsolutePosition;
+                            detobj.rotQuat = Quaternion.Identity;
+                            detobj.velVector = Vector3.Zero;
+                            detobj.colliderType = 0;
+                            detobj.groupUUID = UUID.Zero;
+                            colliding.Add(detobj);
+                        }
+                    }
+
+                    if (colliding.Count > 0)
+                    {
+                        LandCollidingMessage.Colliders = colliding;
+                        // always running this check because if the user deletes the object it would return a null reference.
+                        if (m_parentGroup == null)
+                            return;
+
+                        if (m_parentGroup.Scene == null)
+                            return;
+
+                        m_parentGroup.Scene.EventManager.TriggerScriptLandColliding(LocalId, LandCollidingMessage);
+                    }
+                }
+            }
+            if ((m_parentGroup.RootPart.ScriptEvents & scriptEvents.land_collision_end) != 0)
+            {
+                if (endedColliders.Count > 0)
+                {
+                    ColliderArgs LandEndCollidingMessage = new ColliderArgs();
+                    List<DetectedObject> colliding = new List<DetectedObject>();
+                    foreach (uint localId in startedColliders)
+                    {
+                        if (localId == 0)
+                        {
+                            //Hope that all is left is ground!
+                            DetectedObject detobj = new DetectedObject();
+                            detobj.keyUUID = UUID.Zero;
+                            detobj.nameStr = "";
+                            detobj.ownerUUID = UUID.Zero;
+                            detobj.posVector = m_parentGroup.RootPart.AbsolutePosition;
+                            detobj.rotQuat = Quaternion.Identity;
+                            detobj.velVector = Vector3.Zero;
+                            detobj.colliderType = 0;
+                            detobj.groupUUID = UUID.Zero;
+                            colliding.Add(detobj);
+                        }
+                    }
+
+                    if (colliding.Count > 0)
+                    {
+                        LandEndCollidingMessage.Colliders = colliding;
+                        // always running this check because if the user deletes the object it would return a null reference.
+                        if (m_parentGroup == null)
+                            return;
+
+                        if (m_parentGroup.Scene == null)
+                            return;
+
+                        m_parentGroup.Scene.EventManager.TriggerScriptLandCollidingEnd(LocalId, LandEndCollidingMessage);
                     }
                 }
             }
@@ -2142,7 +2508,7 @@ namespace OpenSim.Region.Framework.Scenes
             //m_log.Debug("prev: " + prevflag.ToString() + " curr: " + Flags.ToString());
             //ScheduleFullUpdate();
         }
-
+        
         public void RemoveScriptEvents(UUID scriptid)
         {
             lock (m_scriptEvents)
@@ -2196,6 +2562,8 @@ namespace OpenSim.Region.Framework.Scenes
         /// </summary>
         public void ScheduleFullUpdate()
         {
+//            m_log.DebugFormat("[SCENE OBJECT PART]: Scheduling full update for {0} {1}", Name, LocalId);
+            
             if (m_parentGroup != null)
             {
                 m_parentGroup.QueueForUpdateCheck();
@@ -2534,6 +2902,13 @@ namespace OpenSim.Region.Framework.Scenes
             {
                 m_parentGroup.SetAxisRotation(axis, rotate);
             }
+            //Cannot use ScriptBaseClass constants as no referance to it currently.
+            if (axis == 2)//STATUS_ROTATE_X
+                STATUS_ROTATE_X = rotate;
+            if (axis == 4)//STATUS_ROTATE_Y
+                STATUS_ROTATE_Y = rotate;
+            if (axis == 8)//STATUS_ROTATE_Z
+                STATUS_ROTATE_Z = rotate;
         }
 
         public void SetBuoyancy(float fvalue)
@@ -2609,6 +2984,178 @@ namespace OpenSim.Region.Framework.Scenes
             }
         }
 
+        /// <summary>
+        /// Set the color of prim faces
+        /// </summary>
+        /// <param name="color"></param>
+        /// <param name="face"></param>
+        public void SetFaceColor(Vector3 color, int face)
+        {
+            Primitive.TextureEntry tex = Shape.Textures;
+            Color4 texcolor;
+            if (face >= 0 && face < GetNumberOfSides())
+            {
+                texcolor = tex.CreateFace((uint)face).RGBA;
+                texcolor.R = Util.Clip((float)color.X, 0.0f, 1.0f);
+                texcolor.G = Util.Clip((float)color.Y, 0.0f, 1.0f);
+                texcolor.B = Util.Clip((float)color.Z, 0.0f, 1.0f);
+                tex.FaceTextures[face].RGBA = texcolor;
+                UpdateTexture(tex);
+                return;
+            }
+            else if (face == ALL_SIDES)
+            {
+                for (uint i = 0; i < GetNumberOfSides(); i++)
+                {
+                    if (tex.FaceTextures[i] != null)
+                    {
+                        texcolor = tex.FaceTextures[i].RGBA;
+                        texcolor.R = Util.Clip((float)color.X, 0.0f, 1.0f);
+                        texcolor.G = Util.Clip((float)color.Y, 0.0f, 1.0f);
+                        texcolor.B = Util.Clip((float)color.Z, 0.0f, 1.0f);
+                        tex.FaceTextures[i].RGBA = texcolor;
+                    }
+                    texcolor = tex.DefaultTexture.RGBA;
+                    texcolor.R = Util.Clip((float)color.X, 0.0f, 1.0f);
+                    texcolor.G = Util.Clip((float)color.Y, 0.0f, 1.0f);
+                    texcolor.B = Util.Clip((float)color.Z, 0.0f, 1.0f);
+                    tex.DefaultTexture.RGBA = texcolor;
+                }
+                UpdateTexture(tex);
+                return;
+            }
+        }
+
+        /// <summary>
+        /// Get the number of sides that this part has.
+        /// </summary>
+        /// <returns></returns>
+        public int GetNumberOfSides()
+        {
+            int ret = 0;
+            bool hasCut;
+            bool hasHollow;
+            bool hasDimple;
+            bool hasProfileCut;
+
+            PrimType primType = GetPrimType();
+            HasCutHollowDimpleProfileCut(primType, Shape, out hasCut, out hasHollow, out hasDimple, out hasProfileCut);
+
+            switch (primType)
+            {
+                case PrimType.BOX:
+                    ret = 6;
+                    if (hasCut) ret += 2;
+                    if (hasHollow) ret += 1;
+                    break;
+                case PrimType.CYLINDER:
+                    ret = 3;
+                    if (hasCut) ret += 2;
+                    if (hasHollow) ret += 1;
+                    break;
+                case PrimType.PRISM:
+                    ret = 5;
+                    if (hasCut) ret += 2;
+                    if (hasHollow) ret += 1;
+                    break;
+                case PrimType.SPHERE:
+                    ret = 1;
+                    if (hasCut) ret += 2;
+                    if (hasDimple) ret += 2;
+                    if (hasHollow) ret += 1;
+                    break;
+                case PrimType.TORUS:
+                    ret = 1;
+                    if (hasCut) ret += 2;
+                    if (hasProfileCut) ret += 2;
+                    if (hasHollow) ret += 1;
+                    break;
+                case PrimType.TUBE:
+                    ret = 4;
+                    if (hasCut) ret += 2;
+                    if (hasProfileCut) ret += 2;
+                    if (hasHollow) ret += 1;
+                    break;
+                case PrimType.RING:
+                    ret = 3;
+                    if (hasCut) ret += 2;
+                    if (hasProfileCut) ret += 2;
+                    if (hasHollow) ret += 1;
+                    break;
+                case PrimType.SCULPT:
+                    ret = 1;
+                    break;
+            }
+            return ret;
+        }
+
+        /// <summary>
+        /// Tell us what type this prim is
+        /// </summary>
+        /// <param name="primShape"></param>
+        /// <returns></returns>
+        public PrimType GetPrimType()
+        {
+            if (Shape.SculptEntry)
+                return PrimType.SCULPT;
+            if ((Shape.ProfileCurve & 0x07) == (byte)ProfileShape.Square)
+            {
+                if (Shape.PathCurve == (byte)Extrusion.Straight)
+                    return PrimType.BOX;
+                else if (Shape.PathCurve == (byte)Extrusion.Curve1)
+                    return PrimType.TUBE;
+            }
+            else if ((Shape.ProfileCurve & 0x07) == (byte)ProfileShape.Circle)
+            {
+                if (Shape.PathCurve == (byte)Extrusion.Straight)
+                    return PrimType.CYLINDER;
+                // ProfileCurve seems to combine hole shape and profile curve so we need to only compare against the lower 3 bits
+                else if (Shape.PathCurve == (byte)Extrusion.Curve1)
+                    return PrimType.TORUS;
+            }
+            else if ((Shape.ProfileCurve & 0x07) == (byte)ProfileShape.HalfCircle)
+            {
+                if (Shape.PathCurve == (byte)Extrusion.Curve1 || Shape.PathCurve == (byte)Extrusion.Curve2)
+                    return PrimType.SPHERE;
+            }
+            else if ((Shape.ProfileCurve & 0x07) == (byte)ProfileShape.EquilateralTriangle)
+            {
+                if (Shape.PathCurve == (byte)Extrusion.Straight)
+                    return PrimType.PRISM;
+                else if (Shape.PathCurve == (byte)Extrusion.Curve1)
+                    return PrimType.RING;
+            }
+            
+            return PrimType.BOX;
+        }
+        
+        /// <summary>
+        /// Tell us if this object has cut, hollow, dimple, and other factors affecting the number of faces 
+        /// </summary>
+        /// <param name="primType"></param>
+        /// <param name="shape"></param>
+        /// <param name="hasCut"></param>
+        /// <param name="hasHollow"></param>
+        /// <param name="hasDimple"></param>
+        /// <param name="hasProfileCut"></param>
+        protected static void HasCutHollowDimpleProfileCut(PrimType primType, PrimitiveBaseShape shape, out bool hasCut, out bool hasHollow,
+            out bool hasDimple, out bool hasProfileCut)
+        {
+            if (primType == PrimType.BOX
+                ||
+                primType == PrimType.CYLINDER
+                ||
+                primType == PrimType.PRISM)
+
+                hasCut = (shape.ProfileBegin > 0) || (shape.ProfileEnd > 0);
+            else
+                hasCut = (shape.PathBegin > 0) || (shape.PathEnd > 0);
+
+            hasHollow = shape.ProfileHollow > 0;
+            hasDimple = (shape.ProfileBegin > 0) || (shape.ProfileEnd > 0); // taken from llSetPrimitiveParms
+            hasProfileCut = hasDimple; // is it the same thing?
+        }
+        
         public void SetGroup(UUID groupID, IClientAPI client)
         {
             _groupID = groupID;
@@ -2640,6 +3187,11 @@ namespace OpenSim.Region.Framework.Scenes
             }
         }
 
+        /// <summary>
+        /// Set the events that this part will pass on to listeners.
+        /// </summary>
+        /// <param name="scriptid"></param>
+        /// <param name="events"></param>
         public void SetScriptEvents(UUID scriptid, int events)
         {
             // scriptEvents oldparts;
@@ -2678,8 +3230,8 @@ namespace OpenSim.Region.Framework.Scenes
         {
             m_parentGroup.stopLookAt();
 
-            m_parentGroup.ScheduleGroupForTerseUpdate();        
-        }        
+            m_parentGroup.ScheduleGroupForTerseUpdate();
+        }
         
         /// <summary>
         /// Set the text displayed for this part.
@@ -3466,6 +4018,9 @@ namespace OpenSim.Region.Framework.Scenes
                             ((AggregateScriptEvents & scriptEvents.collision) != 0) ||
                             ((AggregateScriptEvents & scriptEvents.collision_end) != 0) ||
                             ((AggregateScriptEvents & scriptEvents.collision_start) != 0) ||
+                            ((AggregateScriptEvents & scriptEvents.land_collision_start) != 0) ||
+                            ((AggregateScriptEvents & scriptEvents.land_collision) != 0) ||
+                            ((AggregateScriptEvents & scriptEvents.land_collision_end) != 0) ||
                             (CollisionSound != UUID.Zero)
                             )
                         {
@@ -3589,9 +4144,13 @@ namespace OpenSim.Region.Framework.Scenes
             ScheduleFullUpdate();
         }
 
-        // Added to handle bug in libsecondlife's TextureEntry.ToBytes()
-        // not handling RGBA properly. Cycles through, and "fixes" the color
-        // info
+        /// <summary>
+        /// Update the textures on the part.
+        /// </summary>
+        /// Added to handle bug in libsecondlife's TextureEntry.ToBytes()
+        /// not handling RGBA properly. Cycles through, and "fixes" the color
+        /// info
+        /// <param name="tex"></param>
         public void UpdateTexture(Primitive.TextureEntry tex)
         {
             //Color4 tmpcolor;
@@ -3670,6 +4229,9 @@ namespace OpenSim.Region.Framework.Scenes
                 ((AggregateScriptEvents & scriptEvents.collision) != 0) ||
                 ((AggregateScriptEvents & scriptEvents.collision_end) != 0) ||
                 ((AggregateScriptEvents & scriptEvents.collision_start) != 0) ||
+                ((AggregateScriptEvents & scriptEvents.land_collision_start) != 0) ||
+                ((AggregateScriptEvents & scriptEvents.land_collision) != 0) ||
+                ((AggregateScriptEvents & scriptEvents.land_collision_end) != 0) ||
                 (CollisionSound != UUID.Zero)
                 )
             {
@@ -3692,6 +4254,8 @@ namespace OpenSim.Region.Framework.Scenes
 
             if (m_parentGroup == null)
             {
+//                m_log.DebugFormat(
+//                    "[SCENE OBJECT PART]: Scheduling part {0} {1} for full update in aggregateScriptEvents() since m_parentGroup == null", Name, LocalId);
                 ScheduleFullUpdate();
                 return;
             }
@@ -3708,9 +4272,15 @@ namespace OpenSim.Region.Framework.Scenes
             LocalFlags=(PrimFlags)objectflagupdate;
 
             if (m_parentGroup != null && m_parentGroup.RootPart == this)
+            {
                 m_parentGroup.aggregateScriptEvents();
+            }
             else
+            {
+//                m_log.DebugFormat(
+//                    "[SCENE OBJECT PART]: Scheduling part {0} {1} for full update in aggregateScriptEvents()", Name, LocalId);                
                 ScheduleFullUpdate();
+            }
         }
 
         public int registerTargetWaypoint(Vector3 target, float tolerance)
@@ -3727,6 +4297,23 @@ namespace OpenSim.Region.Framework.Scenes
             if (m_parentGroup != null)
             {
                 m_parentGroup.unregisterTargetWaypoint(handle);
+            }
+        }
+
+        public int registerRotTargetWaypoint(Quaternion target, float tolerance)
+        {
+            if (m_parentGroup != null)
+            {
+                return m_parentGroup.registerRotTargetWaypoint(target, tolerance);
+            }
+            return 0;
+        }
+
+        public void unregisterRotTargetWaypoint(int handle)
+        {
+            if (m_parentGroup != null)
+            {
+                m_parentGroup.unregisterRotTargetWaypoint(handle);
             }
         }
 

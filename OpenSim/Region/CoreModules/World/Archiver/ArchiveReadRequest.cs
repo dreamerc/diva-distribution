@@ -104,7 +104,7 @@ namespace OpenSim.Region.CoreModules.World.Archiver
             List<string> serialisedParcels = new List<string>();
             string filePath = "NONE";
 
-            TarArchiveReader archive = new TarArchiveReader(m_loadStream);          
+            TarArchiveReader archive = new TarArchiveReader(m_loadStream);
             byte[] data;
             TarArchiveReader.TarEntryType entryType;
             
@@ -423,9 +423,11 @@ namespace OpenSim.Region.CoreModules.World.Archiver
             currentRegionSettings.TerrainTexture4 = loadedRegionSettings.TerrainTexture4;
             currentRegionSettings.UseEstateSun = loadedRegionSettings.UseEstateSun;
             currentRegionSettings.WaterHeight = loadedRegionSettings.WaterHeight;
-
+            
             IEstateModule estateModule = m_scene.RequestModuleInterface<IEstateModule>();
-            estateModule.sendRegionHandshakeToAll();
+
+            if (estateModule != null)
+                estateModule.sendRegionHandshakeToAll();
 
             return true;
         }

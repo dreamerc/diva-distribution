@@ -47,6 +47,7 @@ namespace OpenSim.Region.CoreModules.Avatar.InstantMessage
         private bool enabled = true;
         private List<Scene> m_SceneList = new List<Scene>();
         private string m_RestURL = String.Empty;
+        private bool m_ForwardOfflineGroupMessages = true;
 
         public void Initialise(Scene scene, IConfigSource config)
         {
@@ -66,6 +67,9 @@ namespace OpenSim.Region.CoreModules.Avatar.InstantMessage
                 enabled = false;
                 return;
             }
+
+            if (cnf != null)
+                m_ForwardOfflineGroupMessages = cnf.GetBoolean("ForwardOfflineGroupMessages", m_ForwardOfflineGroupMessages);
 
             lock (m_SceneList)
             {
@@ -159,30 +163,34 @@ namespace OpenSim.Region.CoreModules.Avatar.InstantMessage
 
         private void RetrieveInstantMessages(IClientAPI client)
         {
-            m_log.DebugFormat("[OFFLINE MESSAGING] Retrieving stored messages for {0}", client.AgentId);
-
-            List<GridInstantMessage>msglist = SynchronousRestObjectPoster.BeginPostObject<UUID, List<GridInstantMessage>>(
-                    "POST", m_RestURL+"/RetrieveMessages/", client.AgentId);
-
-            foreach (GridInstantMessage im in msglist)
+            if (m_RestURL != "")
             {
-                // client.SendInstantMessage(im);
+                m_log.DebugFormat("[OFFLINE MESSAGING] Retrieving stored messages for {0}", client.AgentId);
 
-                // Send through scene event manager so all modules get a chance
-                // to look at this message before it gets delivered.
-                //
-                // Needed for proper state management for stored group
-                // invitations
-                //
-                Scene s = FindScene(client.AgentId);
-                if (s != null)
-                    s.EventManager.TriggerIncomingInstantMessage(im);
+                List<GridInstantMessage> msglist = SynchronousRestObjectPoster.BeginPostObject<UUID, List<GridInstantMessage>>(
+                        "POST", m_RestURL + "/RetrieveMessages/", client.AgentId);
+
+                foreach (GridInstantMessage im in msglist)
+                {
+                    // client.SendInstantMessage(im);
+
+                    // Send through scene event manager so all modules get a chance
+                    // to look at this message before it gets delivered.
+                    //
+                    // Needed for proper state management for stored group
+                    // invitations
+                    //
+                    Scene s = FindScene(client.AgentId);
+                    if (s != null)
+                        s.EventManager.TriggerIncomingInstantMessage(im);
+                }
             }
         }
 
         private void UndeliveredMessage(GridInstantMessage im)
         {
-            if (im.offline != 0)
+            if ((im.offline != 0)
+                && (!im.fromGroup || (im.fromGroup && m_ForwardOfflineGroupMessages)))
             {
                 bool success = SynchronousRestObjectPoster.BeginPostObject<GridInstantMessage, bool>(
                         "POST", m_RestURL+"/SaveMessage/", im);

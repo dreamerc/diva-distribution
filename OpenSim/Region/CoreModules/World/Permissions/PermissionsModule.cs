@@ -125,6 +125,7 @@ namespace OpenSim.Region.CoreModules.World.Permissions
         private bool m_debugPermissions = false;
         private bool m_allowGridGods = false;
         private bool m_RegionOwnerIsGod = false;
+        private bool m_RegionManagerIsGod = false;
         private bool m_ParcelOwnerIsGod = false;
         
         /// <value>
@@ -167,6 +168,7 @@ namespace OpenSim.Region.CoreModules.World.Permissions
             m_bypassPermissions = !myConfig.GetBoolean("serverside_object_permissions", false);
             m_propagatePermissions = myConfig.GetBoolean("propagate_permissions", true);
             m_RegionOwnerIsGod = myConfig.GetBoolean("region_owner_is_god", true);
+            m_RegionManagerIsGod = myConfig.GetBoolean("region_manager_is_god", false);
             m_ParcelOwnerIsGod = myConfig.GetBoolean("parcel_owner_is_god", true);
             
             m_allowedScriptCreators 
@@ -468,10 +470,13 @@ namespace OpenSim.Region.CoreModules.World.Permissions
             
             if (m_scene.RegionInfo.EstateSettings.EstateOwner != UUID.Zero)
             {
-                if (m_scene.RegionInfo.EstateSettings.EstateOwner == user)
+                if (m_scene.RegionInfo.EstateSettings.EstateOwner == user && m_RegionOwnerIsGod)
                     return true;
             }
             
+            if (IsEstateManager(user) && m_RegionManagerIsGod)
+                return true;
+
             if (m_allowGridGods)
             {
                 CachedUserInfo profile = m_scene.CommsManager.UserProfileCacheService.GetUserDetails(user);
@@ -484,6 +489,7 @@ namespace OpenSim.Region.CoreModules.World.Permissions
 
             return false;
         }
+
         protected bool IsFriendWithPerms(UUID user,UUID objectOwner)
         {
             
@@ -596,7 +602,7 @@ namespace OpenSim.Region.CoreModules.World.Permissions
                 return objectOwnerMask;
 
             // Estate users should be able to edit anything in the sim
-            if (IsEstateManager(user) && m_RegionOwnerIsGod && !IsAdministrator(objectOwner))
+            if (IsEstateManager(user) && m_RegionOwnerIsGod && (!IsAdministrator(objectOwner)) || objectOwner == user)
                 return objectOwnerMask;
 
             // Admin should be able to edit anything in the sim (including admin objects)
@@ -800,7 +806,7 @@ namespace OpenSim.Region.CoreModules.World.Permissions
         }
     
         protected bool GenericParcelOwnerPermission(UUID user, ILandObject parcel, ulong groupPowers)
-        {          
+        {
             if (parcel.LandData.OwnerID == user)
             {
                 // Returning immediately so that group deeded objects on group deeded land don't trigger a NRE on
