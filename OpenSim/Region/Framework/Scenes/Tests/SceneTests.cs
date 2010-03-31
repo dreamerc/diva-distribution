@@ -101,7 +101,16 @@ namespace OpenSim.Region.Framework.Scenes.Tests
                 {
                     throw new NotImplementedException();
                 }
-
+                public RegionLightShareData LoadRegionWindlightSettings(UUID regionUUID)
+                {
+                    //This connector doesn't support the windlight module yet
+                    //Return default LL windlight settings
+                    return new RegionLightShareData();
+                }
+                public void StoreRegionWindlightSettings(RegionLightShareData wl)
+                {
+                    //This connector doesn't support the windlight module yet
+                }
                 public RegionSettings LoadRegionSettings(UUID regionUUID)
                 {
                     return null;
@@ -132,7 +141,7 @@ namespace OpenSim.Region.Framework.Scenes.Tests
             RegionInfo regionInfo = new RegionInfo(0,0,null,null);
             FakeStorageManager storageManager = new FakeStorageManager();
 
-            new Scene(regionInfo, null, null, null, storageManager, null, false, false, false, null, null);
+            new Scene(regionInfo, null, null, storageManager, null, false, false, false, null, null);
         }
     }
 }

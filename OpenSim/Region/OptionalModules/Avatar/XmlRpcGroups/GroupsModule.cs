@@ -43,6 +43,8 @@ using OpenSim.Region.CoreModules.Framework.EventQueue;
 using OpenSim.Region.Framework.Interfaces;
 using OpenSim.Region.Framework.Scenes;
 
+using OpenSim.Services.Interfaces;
+
 using Caps = OpenSim.Framework.Capabilities.Caps;
 using DirFindFlags = OpenMetaverse.DirectoryManager.DirFindFlags;
 
@@ -326,17 +328,19 @@ namespace OpenSim.Region.OptionalModules.Avatar.XmlRpcGroups
         }
         */
 
-
         void OnDirFindQuery(IClientAPI remoteClient, UUID queryID, string queryText, uint queryFlags, int queryStart)
         {
             if (((DirFindFlags)queryFlags & DirFindFlags.Groups) == DirFindFlags.Groups)
             {
-                if (m_debugEnabled) m_log.DebugFormat("[GROUPS]: {0} called with queryText({1}) queryFlags({2}) queryStart({3})", System.Reflection.MethodBase.GetCurrentMethod().Name, queryText, (DirFindFlags)queryFlags, queryStart);
+                if (m_debugEnabled) 
+                    m_log.DebugFormat(
+                        "[GROUPS]: {0} called with queryText({1}) queryFlags({2}) queryStart({3})", 
+                        System.Reflection.MethodBase.GetCurrentMethod().Name, queryText, (DirFindFlags)queryFlags, queryStart);
 
                 // TODO: This currently ignores pretty much all the query flags including Mature and sort order
-                remoteClient.SendDirGroupsReply(queryID, m_groupData.FindGroups(GetClientGroupRequestID(remoteClient), queryText).ToArray());
-            }
-            
+                remoteClient.SendDirGroupsReply(
+                    queryID, m_groupData.FindGroups(GetClientGroupRequestID(remoteClient), queryText).ToArray());
+            }            
         }
 
         private void OnAgentDataUpdateRequest(IClientAPI remoteClient, UUID dataForAgentID, UUID sessionID)
@@ -361,7 +365,7 @@ namespace OpenSim.Region.OptionalModules.Avatar.XmlRpcGroups
             SendScenePresenceUpdate(dataForAgentID, activeGroupTitle);
         }
 
-        private void HandleUUIDGroupNameRequest(UUID GroupID,IClientAPI remoteClient)
+        private void HandleUUIDGroupNameRequest(UUID GroupID, IClientAPI remoteClient)
         {
             if (m_debugEnabled) m_log.DebugFormat("[GROUPS]: {0} called", System.Reflection.MethodBase.GetCurrentMethod().Name);
 
@@ -507,10 +511,10 @@ namespace OpenSim.Region.OptionalModules.Avatar.XmlRpcGroups
                     {
                          if (m_debugEnabled)
                         {
-                            UserProfileData targetUserProfile = m_sceneList[0].CommsManager.UserService.GetUserProfile(member.AgentID);
-                            if (targetUserProfile != null)
+                            UserAccount targetUser = m_sceneList[0].UserAccountService.GetUserAccount(remoteClient.Scene.RegionInfo.ScopeID, member.AgentID);
+                            if (targetUser != null)
                             {
-                                m_log.DebugFormat("[GROUPS]: Prepping group notice {0} for agent: {1} who Accepts Notices ({2})", NoticeID, targetUserProfile.Name, member.AcceptNotices);
+                                m_log.DebugFormat("[GROUPS]: Prepping group notice {0} for agent: {1} who Accepts Notices ({2})", NoticeID, targetUser.FirstName + " " + targetUser.LastName, member.AcceptNotices);
                             }
                             else
                             {
@@ -591,6 +595,11 @@ namespace OpenSim.Region.OptionalModules.Avatar.XmlRpcGroups
             return m_groupData.GetGroupRecord(null, GroupID, null);
         }
 
+        public GroupRecord GetGroupRecord(string name)
+        {
+            return m_groupData.GetGroupRecord(null, UUID.Zero, name);
+        }
+        
         public void ActivateGroup(IClientAPI remoteClient, UUID groupID)
         {
             if (m_debugEnabled) m_log.DebugFormat("[GROUPS]: {0} called", System.Reflection.MethodBase.GetCurrentMethod().Name);
@@ -650,7 +659,6 @@ namespace OpenSim.Region.OptionalModules.Avatar.XmlRpcGroups
             List<GroupRolesData> data = m_groupData.GetGroupRoles(GetClientGroupRequestID(remoteClient), groupID);
 
             return data;
-
         }
 
         public List<GroupRoleMembersData> GroupRoleMembersRequest(IClientAPI remoteClient, UUID groupID)
@@ -660,8 +668,6 @@ namespace OpenSim.Region.OptionalModules.Avatar.XmlRpcGroups
             List<GroupRoleMembersData> data = m_groupData.GetGroupRoleMembers(GetClientGroupRequestID(remoteClient), groupID);
 
             return data;
-
-
         }
 
         public GroupProfileData GroupProfileRequest(IClientAPI remoteClient, UUID groupID)
@@ -710,7 +716,10 @@ namespace OpenSim.Region.OptionalModules.Avatar.XmlRpcGroups
 
         public GroupMembershipData GetMembershipData(UUID groupID, UUID agentID)
         {
-            if (m_debugEnabled) m_log.DebugFormat("[GROUPS]: {0} called", System.Reflection.MethodBase.GetCurrentMethod().Name);
+            if (m_debugEnabled) 
+                m_log.DebugFormat(
+                    "[GROUPS]: {0} called with groupID={1}, agentID={2}",
+                    System.Reflection.MethodBase.GetCurrentMethod().Name, groupID, agentID);
 
             return m_groupData.GetAgentGroupMembership(null, agentID, groupID);
         }
@@ -744,7 +753,7 @@ namespace OpenSim.Region.OptionalModules.Avatar.XmlRpcGroups
                 return UUID.Zero;
             }
             // is there is a money module present ?
-            IMoneyModule money=remoteClient.Scene.RequestModuleInterface<IMoneyModule>();
+            IMoneyModule money = remoteClient.Scene.RequestModuleInterface<IMoneyModule>();
             if (money != null)
             {
                 // do the transaction, that is if the agent has got sufficient funds
@@ -990,9 +999,8 @@ namespace OpenSim.Region.OptionalModules.Avatar.XmlRpcGroups
             remoteClient.SendEjectGroupMemberReply(remoteClient.AgentId, groupID, true);
 
             GroupRecord groupInfo = m_groupData.GetGroupRecord(grID, groupID, null);
-            UserProfileData userProfile = m_sceneList[0].CommsManager.UserService.GetUserProfile(ejecteeID);
-
-            if ((groupInfo == null) || (userProfile == null))
+            UserAccount account = m_sceneList[0].UserAccountService.GetUserAccount(remoteClient.Scene.RegionInfo.ScopeID, ejecteeID);
+            if ((groupInfo == null) || (account == null))
             {
                 return;
             }
@@ -1032,9 +1040,9 @@ namespace OpenSim.Region.OptionalModules.Avatar.XmlRpcGroups
             msg.toAgentID = remoteClient.AgentId.Guid;
             msg.timestamp = 0;
             msg.fromAgentName = remoteClient.Name;
-            if (userProfile != null)
+            if (account != null)
             {
-                msg.message = string.Format("{2} has been ejected from '{1}' by {0}.", remoteClient.Name, groupInfo.GroupName, userProfile.Name);
+                msg.message = string.Format("{2} has been ejected from '{1}' by {0}.", remoteClient.Name, groupInfo.GroupName, account.FirstName + " " + account.LastName);
             }
             else
             {
@@ -1147,8 +1155,9 @@ namespace OpenSim.Region.OptionalModules.Avatar.XmlRpcGroups
                     info.RequestID.AgentID = client.AgentId;
                     info.RequestID.SessionID = client.SessionId;
 
-                    UserProfileData userProfile = m_sceneList[0].CommsManager.UserService.GetUserProfile(client.AgentId);
-                    if (userProfile == null)
+                    //UserProfileData userProfile = m_sceneList[0].CommsManager.UserService.GetUserProfile(client.AgentId);
+                    UserAccount account = m_sceneList[0].UserAccountService.GetUserAccount(client.Scene.RegionInfo.ScopeID, client.AgentId);
+                    if (account == null)
                     {
                         // This should be impossible.  If I've been passed a reference to a client
                         // that client should be registered with the UserService.  So something
@@ -1157,19 +1166,18 @@ namespace OpenSim.Region.OptionalModules.Avatar.XmlRpcGroups
                         m_log.WarnFormat("[GROUPS]: Could not find a user profile for {0} / {1}", client.Name, client.AgentId);
 
                         // Default to local user service and hope for the best?
-                        info.RequestID.UserServiceURL = m_sceneList[0].CommsManager.NetworkServersInfo.UserURL;
+                        // REFACTORING PROBLEM
+                        //info.RequestID.UserServiceURL = m_sceneList[0].CommsManager.NetworkServersInfo.UserURL;
 
-                    }
-                    else if (userProfile is ForeignUserProfileData)
-                    {
-                        // They aren't from around here
-                        ForeignUserProfileData fupd = (ForeignUserProfileData)userProfile;
-                        info.RequestID.UserServiceURL = fupd.UserServerURI;
                     }
                     else
                     {
+                        string domain = string.Empty; //m_sceneList[0].CommsManager.NetworkServersInfo.UserURL;
+                        object homeUriObj;
+                        if (account.ServiceURLs.TryGetValue("HomeURI", out homeUriObj) && homeUriObj != null)
+                            domain = homeUriObj.ToString();
                         // They're a local user, use this:
-                        info.RequestID.UserServiceURL = m_sceneList[0].CommsManager.NetworkServersInfo.UserURL;
+                        info.RequestID.UserServiceURL = domain;
                     }
 
                     m_clientRequestIDInfo.Add(client.AgentId, info);
@@ -1342,12 +1350,12 @@ namespace OpenSim.Region.OptionalModules.Avatar.XmlRpcGroups
             if (m_debugEnabled) m_log.DebugFormat("[GROUPS]: {0} called", System.Reflection.MethodBase.GetCurrentMethod().Name);
 
             // TODO: All the client update functions need to be reexamined because most do too much and send too much stuff
-            UserProfileData userProfile = m_sceneList[0].CommsManager.UserService.GetUserProfile(dataForAgentID);
+            UserAccount account = m_sceneList[0].UserAccountService.GetUserAccount(remoteClient.Scene.RegionInfo.ScopeID, dataForAgentID);
             string firstname, lastname;
-            if (userProfile != null)
+            if (account != null)
             {
-                firstname = userProfile.FirstName;
-                lastname = userProfile.SurName;
+                firstname = account.FirstName;
+                lastname = account.LastName;
             }
             else
             {
